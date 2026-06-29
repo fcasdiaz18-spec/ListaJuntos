@@ -562,13 +562,14 @@ header{-webkit-position:sticky;position:sticky}
     </div>
 
     <div id="boletaResult" style="display:none" class="bol-preview">
-      <img id="boletaImg" class="bol-preview-img" style="display:none" alt="Boleta">
+      <img id="boletaImg" class="bol-preview-img" style="display:none;max-width:100%;border-radius:8px;margin-bottom:10px" alt="Boleta">
+      <div id="pdfPreviewBox" style="display:none;background:var(--red-bg);border:1.5px solid var(--red-br);border-radius:10px;margin-bottom:10px"></div>
       <div id="scanBar" class="scanning-bar" style="display:none"></div>
       <div id="scanStatus" style="font-size:13px;font-weight:700;color:var(--muted);margin-bottom:8px"></div>
       <div class="result-items" id="resultItems"></div>
-      <div id="addAllBtn" style="display:none;margin-top:14px">
+      <div id="addAllBtn" style="display:none;margin-top:14px;gap:8px;flex-wrap:wrap">
         <button class="btn btn-g" onclick="addAllToInv()">✅ Agregar todos al inventario</button>
-        <button class="btn btn-ghost" style="margin-left:8px" onclick="clearBoleta()">🗑️ Cancelar</button>
+        <button class="btn btn-ghost" onclick="clearBoleta()">🗑️ Cancelar</button>
       </div>
     </div>
   </div>
@@ -1142,30 +1143,63 @@ function processFile(file){
 
 function processImage(file){
   const reader=new FileReader();
+  reader.onerror=function(){ showFileError('No se pudo leer la imagen. Intenta con otro formato.'); };
   reader.onload=function(ev){
+    // Ocultar preview de PDF si había uno
+    document.getElementById('pdfPreviewBox').style.display='none';
     const img=document.getElementById('boletaImg');
-    img.src=ev.target.result;
     img.style.display='block';
-    // Determine media type - iOS HEIC support
+    img.onerror=function(){ img.style.display='none'; };
+    img.src=ev.target.result;
+    // Normalize MIME for iOS HEIC
     let mimeType=file.type||'image/jpeg';
-    if(mimeType==='image/heic'||mimeType==='image/heif') mimeType='image/jpeg';
+    if(mimeType==='image/heic'||mimeType==='image/heif'||!mimeType) mimeType='image/jpeg';
+    // Force valid API mime
+    const validTypes=['image/jpeg','image/png','image/gif','image/webp'];
+    if(!validTypes.includes(mimeType)) mimeType='image/jpeg';
     analyzeWithAI(ev.target.result, mimeType, 'image');
   };
   reader.readAsDataURL(file);
 }
 
 function processPDF(file){
-  // Para PDF: mostrar ícono de PDF y enviar como document a Claude
+  // Mostrar preview como DIV (no como img) para evitar "Load failed" en iOS Safari
   document.getElementById('boletaImg').style.display='none';
+  const box=document.getElementById('pdfPreviewBox');
+  const fname=file.name||'boleta.pdf';
+  box.innerHTML=`<div style="text-align:center;padding:20px 14px">
+    <div style="font-size:48px;margin-bottom:8px">📄</div>
+    <div style="font-size:14px;font-weight:800;color:var(--red);margin-bottom:4px">PDF cargado</div>
+    <div style="font-size:11px;color:var(--muted);font-weight:600;word-break:break-all">${fname}</div>
+    <div style="font-size:11px;color:var(--muted);margin-top:4px">${(file.size/1024).toFixed(0)} KB</div>
+  </div>`;
+  box.style.display='block';
+
+  // Leer el PDF como ArrayBuffer primero para mayor compatibilidad en iOS
   const reader=new FileReader();
+  reader.onerror=function(){ showFileError('No se pudo leer el PDF. Intenta con una foto de la boleta.'); };
   reader.onload=function(ev){
-    // Mostrar preview de PDF
-    const img=document.getElementById('boletaImg');
-    img.src='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 80"><rect width="120" height="80" fill="%23FEF2F2" rx="8"/><text x="60" y="35" text-anchor="middle" font-size="28">📄</text><text x="60" y="55" text-anchor="middle" font-size="10" fill="%23DC2626" font-weight="bold">PDF cargado</text><text x="60" y="67" text-anchor="middle" font-size="8" fill="%238591B4">'+file.name.substring(0,30)+'</text></svg>';
-    img.style.display='block';
-    analyzeWithAI(ev.target.result, 'application/pdf', 'pdf');
+    try{
+      // Convertir ArrayBuffer a base64 manualmente (más confiable en iOS)
+      const arr=new Uint8Array(ev.target.result);
+      let binary='';
+      const chunkSize=8192;
+      for(let i=0;i<arr.length;i+=chunkSize){
+        binary+=String.fromCharCode.apply(null,arr.subarray(i,i+chunkSize));
+      }
+      const b64=btoa(binary);
+      analyzeWithAI('data:application/pdf;base64,'+b64,'application/pdf','pdf');
+    }catch(err){
+      showFileError('Error procesando el PDF: '+err.message);
+    }
   };
-  reader.readAsDataURL(file);
+  reader.readAsArrayBuffer(file);
+}
+
+function showFileError(msg){
+  document.getElementById('scanBar').style.display='none';
+  document.getElementById('scanStatus').textContent='⚠️ '+msg;
+  document.getElementById('scanStatus').style.color='var(--red)';
 }
 
 async function analyzeWithAI(base64data, mimeType, fileType){
@@ -1210,20 +1244,27 @@ Si no es una boleta responde: {"error":"No se detectó una boleta válida"}`;
 
 function showBoletaResult(parsed){
   document.getElementById('scanBar').style.display='none';
+  document.getElementById('scanStatus').style.color='var(--muted)';
   if(parsed.error){
     document.getElementById('scanStatus').textContent='⚠️ '+parsed.error;
+    document.getElementById('scanStatus').style.color='var(--red)';
     return;
   }
   const items=parsed.items||[];
-  document.getElementById('scanStatus').textContent=`✅ Boleta de ${parsed.store||'supermercado'} — ${items.length} productos encontrados`;
+  document.getElementById('scanStatus').textContent=`✅ Boleta de ${parsed.store||'supermercado'} — ${items.length} producto(s) encontrado(s)`;
+  document.getElementById('scanStatus').style.color='var(--green)';
   pendingBoleta=items;
-  document.getElementById('resultItems').innerHTML=items.map((it,i)=>`
+  document.getElementById('resultItems').innerHTML=items.map(it=>`
     <div class="result-item">
       <div class="ri-name">${it.name}</div>
-      <div class="ri-qty">${it.qty} ${it.unit}</div>
+      <div class="ri-qty">${it.qty||1} ${it.unit||'un'}</div>
       <div class="ri-price">${it.price?'$'+Number(it.price).toLocaleString('es-CL'):''}</div>
     </div>`).join('');
-  document.getElementById('addAllBtn').style.display='block';
+  const btn=document.getElementById('addAllBtn');
+  btn.style.display='flex';
+  btn.style.flexWrap='wrap';
+  btn.style.gap='8px';
+  btn.style.marginTop='14px';
 }
 
 function addAllToInv(){
@@ -1246,6 +1287,13 @@ function addAllToInv(){
 function clearBoleta(){
   document.getElementById('boletaResult').style.display='none';
   document.getElementById('boletaImg').style.display='none';
+  document.getElementById('boletaImg').src='';
+  document.getElementById('pdfPreviewBox').style.display='none';
+  document.getElementById('pdfPreviewBox').innerHTML='';
+  document.getElementById('scanStatus').style.color='var(--muted)';
+  document.getElementById('scanStatus').textContent='';
+  document.getElementById('resultItems').innerHTML='';
+  document.getElementById('addAllBtn').style.display='none';
   document.getElementById('fileInput').value='';
   pendingBoleta=[];
 }
