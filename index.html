@@ -1122,7 +1122,7 @@ function renderInv(){
 //  BOLETA / ESCANEO
 // ════════════════════════════════════════════
 
-// Configurar worker de PDF.js
+// PDF.js worker
 if(typeof pdfjsLib !== 'undefined'){
   pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 }
@@ -1132,14 +1132,13 @@ function undrag(e){ e.preventDefault(); document.getElementById('dropZone').clas
 function drop(e){ e.preventDefault(); undrag(e); const f=e.dataTransfer.files[0]; if(f) handleFile({target:{files:[f]}}); }
 function handleFile(e){ const f=e.target.files[0]; if(f) processFile(f); }
 
-function setBoletaStatus(msg, color){
+function setStatus(msg, color){
   const el=document.getElementById('scanStatus');
-  el.textContent=msg;
-  el.style.color=color||'var(--muted)';
+  el.textContent=msg; el.style.color=color||'var(--muted)';
 }
-function showFileError(msg){ 
+function showFileError(msg){
   document.getElementById('scanBar').style.display='none';
-  setBoletaStatus('⚠️ '+msg,'var(--red)');
+  setStatus('⚠️ '+msg,'var(--red)');
 }
 
 function processFile(file){
@@ -1149,16 +1148,162 @@ function processFile(file){
   document.getElementById('resultItems').innerHTML='';
   document.getElementById('addAllBtn').style.display='none';
   document.getElementById('boletaImg').style.display='none';
-  setBoletaStatus(isPDF ? '📄 Extrayendo texto del PDF...' : '🤖 Analizando imagen...','var(--muted)');
+  document.getElementById('pdfPreviewBox').style.display='none';
+  setStatus(isPDF?'📄 Leyendo PDF...':'🤖 Procesando imagen...','var(--muted)');
+  if(isPDF) processPDF(file); else processImage(file);
+}
 
-  if(isPDF){
-    processPDF(file);
-  } else {
-    processImage(file);
+/* ─── PDF: extracción local con PDF.js ─── */
+async function processPDF(file){
+  const box=document.getElementById('pdfPreviewBox');
+  box.innerHTML=`<div style="text-align:center;padding:14px">
+    <div style="font-size:36px;margin-bottom:5px">📄</div>
+    <div style="font-size:13px;font-weight:800;color:#DC2626;margin-bottom:2px">PDF cargado</div>
+    <div style="font-size:10px;color:#8591B4;word-break:break-all">${file.name} · ${(file.size/1024).toFixed(0)} KB</div>
+  </div>`;
+  box.style.display='block';
+
+  try{
+    if(typeof pdfjsLib==='undefined') throw new Error('PDF.js no disponible — verifica conexión a internet.');
+    const buf = await file.arrayBuffer();
+    setStatus('📄 Extrayendo texto...','var(--muted)');
+    const pdf = await pdfjsLib.getDocument({data:new Uint8Array(buf)}).promise;
+    let text='';
+    for(let p=1;p<=pdf.numPages;p++){
+      const page=await pdf.getPage(p);
+      const content=await page.getTextContent();
+      text+=content.items.map(i=>i.str).join('\n')+'\n';
+    }
+    if(!text.trim()) throw new Error('El PDF no tiene texto extraíble. Toma una foto de la boleta en cambio.');
+    setStatus('🧠 Analizando boleta...','var(--muted)');
+    const result = parseBoleta(text);
+    showBoletaResult(result);
+  } catch(err){
+    showFileError(err.message||'Error al procesar el PDF.');
+    console.error(err);
   }
 }
 
-/* ── IMAGEN ── */
+/* ─── PARSER LOCAL DE BOLETAS CHILENAS ─── */
+/* Funciona con Jumbo, Lider, Tottus, Unimarc, Santa Isabel sin necesitar API */
+function parseBoleta(text){
+  const lines = text.split('\n').map(l=>l.trim()).filter(Boolean);
+
+  // Detectar tienda
+  let store='Supermercado';
+  const tl=text.toUpperCase();
+  if(tl.includes('JUMBO')) store='Jumbo';
+  else if(tl.includes('LIDER')||tl.includes('LÍDER')) store='Lider';
+  else if(tl.includes('TOTTUS')) store='Tottus';
+  else if(tl.includes('UNIMARC')) store='Unimarc';
+  else if(tl.includes('SANTA ISABEL')) store='Santa Isabel';
+
+  // Detectar fecha
+  let date='';
+  const dateM=text.match(/(\d{2}\/\d{2}\/\d{2,4})/);
+  if(dateM) date=dateM[1];
+
+  const items=[];
+
+  // ── Patrón 1: Boletas Jumbo/Cencosud ──
+  // Formato: "7790895001239 AGUA ENERGY 500CC 5.000"
+  // con líneas opcionales de descuento/oferta debajo
+  const jumboRE=/^\d{7,13}\s+(.+?)\s+([\d.]+)\s*$/;
+  // Patrón cantidad: "4 X $1.250" o "2 X $3.190"
+  const qtyRE=/^(\d+)\s+[Xx]\s+\$?([\d.]+)$/;
+  // Patrón peso: "0,322 KG X $12.360"
+  const pesoRE=/^([\d,]+)\s+KG\s+[Xx]\s+\$?([\d.]+)$/;
+  // Descuento/oferta (ignorar)
+  const discRE=/^(TMP|OFERTA|DESCUENTO|CAF|LPM|PRI|L-|OFERTA\s)/i;
+
+  let pendingQty=null;
+
+  for(let i=0;i<lines.length;i++){
+    const line=lines[i];
+
+    // Detectar línea de cantidad previa "N X $precio"
+    const qm=line.match(qtyRE);
+    if(qm){ pendingQty={qty:parseInt(qm[1]),priceEach:parseChileanNum(qm[2])}; continue; }
+
+    // Detectar línea de peso "X,XXX KG X $precio"
+    const pm=line.match(pesoRE);
+    if(pm){ pendingQty={qty:parseFloat(pm[1].replace(',','.')),priceEach:parseChileanNum(pm[2]),unit:'kg'}; continue; }
+
+    // Ignorar líneas de descuento/oferta
+    if(discRE.test(line)){ continue; }
+
+    // Línea de producto con código de barras
+    const jm=line.match(jumboRE);
+    if(jm){
+      const rawName=jm[1].trim();
+      const totalPrice=parseChileanNum(jm[2]);
+      if(!rawName||totalPrice<=0){ pendingQty=null; continue; }
+
+      let qty=1, unit='un', price=totalPrice;
+      if(pendingQty){
+        qty=pendingQty.qty;
+        unit=pendingQty.unit||'un';
+        price=pendingQty.priceEach||Math.round(totalPrice/qty);
+        pendingQty=null;
+      }
+
+      // Limpiar nombre: capitalizar correctamente
+      const name=cleanProductName(rawName);
+      if(name) items.push({name,qty,unit,price:Math.round(price)});
+      continue;
+    }
+
+    // Reset pendingQty si la línea no es relevante
+    if(line.length>2 && !line.match(/^[-\s*]+$/)) pendingQty=null;
+  }
+
+  // ── Patrón 2: Si no encontró nada con Jumbo, probar formato genérico ──
+  if(items.length===0){
+    // Buscar líneas con precio al final: "Nombre producto     $1.990" o "Nombre producto    1.990"
+    const genRE=/^(.{3,40}?)\s{2,}\$?\s*([\d]{1,3}(?:[.,]\d{3})+|\d+)\s*$/;
+    for(const line of lines){
+      if(/sub.?total|total|descuento|iva|neto|vuelto|credito|fecha|boleta|rut|sii|puntos|nombre|saldo/i.test(line)) continue;
+      const gm=line.match(genRE);
+      if(gm){
+        const name=cleanProductName(gm[1]);
+        const price=parseChileanNum(gm[2]);
+        if(name&&price>0) items.push({name,qty:1,unit:'un',price});
+      }
+    }
+  }
+
+  if(items.length===0){
+    return {error:'No se encontraron productos en la boleta. El PDF podría ser una imagen escaneada — toma una foto con la cámara.'};
+  }
+
+  return {store,date,items};
+}
+
+function parseChileanNum(str){
+  // "5.000" → 5000 | "6.380" → 6380 | "3.980" → 3980
+  if(!str) return 0;
+  const s=str.replace(/\s/g,'');
+  // Si tiene coma decimal: "1,250" → 1.25 (poco probable en precios)
+  if(s.includes(',')&&!s.includes('.')){
+    return Math.round(parseFloat(s.replace(',','.'))*1000)/1000;
+  }
+  // Punto como separador de miles: "5.000" → 5000
+  return parseInt(s.replace(/\./g,''),10)||0;
+}
+
+function cleanProductName(raw){
+  if(!raw) return '';
+  // Eliminar códigos internos y caracteres especiales
+  let n=raw.replace(/\b\d{7,}\b/g,'').trim();
+  // Capitalizar: "AGUA ENERGY 500CC" → "Agua Energy 500cc"
+  n=n.toLowerCase().replace(/\b(\w)/g,c=>c.toUpperCase());
+  // Limpiar espacios múltiples
+  n=n.replace(/\s+/g,' ').trim();
+  // Mínimo 3 caracteres
+  return n.length>=3?n:'';
+}
+
+/* ─── IMAGEN: usar API de Claude ─── */
 function processImage(file){
   const reader=new FileReader();
   reader.onerror=()=>showFileError('No se pudo leer la imagen.');
@@ -1166,138 +1311,40 @@ function processImage(file){
     document.getElementById('pdfPreviewBox').style.display='none';
     const img=document.getElementById('boletaImg');
     img.onerror=()=>{ img.style.display='none'; };
-    img.src=ev.target.result;
-    img.style.display='block';
+    img.src=ev.target.result; img.style.display='block';
     let mime=file.type||'image/jpeg';
-    if(mime==='image/heic'||mime==='image/heif'||!mime) mime='image/jpeg';
-    const valid=['image/jpeg','image/png','image/gif','image/webp'];
-    if(!valid.includes(mime)) mime='image/jpeg';
+    if(!['image/jpeg','image/png','image/gif','image/webp'].includes(mime)) mime='image/jpeg';
     analyzeImageWithAI(ev.target.result, mime);
   };
   reader.readAsDataURL(file);
 }
 
-/* ── PDF: extraer texto con PDF.js, luego enviar texto a Claude ── */
-async function processPDF(file){
-  // Mostrar preview del PDF como div (no img, iOS no lo soporta)
-  const box=document.getElementById('pdfPreviewBox');
-  box.innerHTML=`<div style="text-align:center;padding:16px 14px">
-    <div style="font-size:40px;margin-bottom:6px">📄</div>
-    <div style="font-size:13px;font-weight:800;color:#DC2626;margin-bottom:3px">PDF listo</div>
-    <div style="font-size:11px;color:#8591B4;word-break:break-all">${file.name}</div>
-    <div style="font-size:11px;color:#8591B4;margin-top:2px">${(file.size/1024).toFixed(0)} KB</div>
-  </div>`;
-  box.style.display='block';
-
+async function analyzeImageWithAI(b64data, mime){
+  const b64=b64data.replace(/^data:[^;]+;base64,/,'');
   try{
-    // Leer como ArrayBuffer
-    const arrayBuf = await file.arrayBuffer();
-    
-    if(typeof pdfjsLib === 'undefined'){
-      throw new Error('PDF.js no cargó. Verifica tu conexión a internet.');
-    }
-
-    setBoletaStatus('📄 Leyendo páginas del PDF...','var(--muted)');
-
-    // Cargar PDF con PDF.js
-    const pdf = await pdfjsLib.getDocument({data: arrayBuf}).promise;
-    
-    let fullText = '';
-    for(let pageNum=1; pageNum<=pdf.numPages; pageNum++){
-      const page = await pdf.getPage(pageNum);
-      const content = await page.getTextContent();
-      const pageText = content.items.map(item => item.str).join(' ');
-      fullText += pageText + '\n';
-    }
-
-    if(!fullText.trim()){
-      throw new Error('El PDF no contiene texto legible. Intenta con una foto de la boleta.');
-    }
-
-    setBoletaStatus('🤖 Analizando boleta con IA...','var(--muted)');
-    await analyzeTextWithAI(fullText, file.name);
-
-  } catch(err){
-    showFileError(err.message || 'Error procesando el PDF.');
-    console.error('PDF error:', err);
-  }
-}
-
-/* ── CLAUDE: analizar IMAGEN (base64) ── */
-async function analyzeImageWithAI(base64data, mimeType){
-  const b64 = base64data.replace(/^data:[^;]+;base64,/, '');
-  const prompt = buildPrompt();
-  try{
-    const res = await fetch('https://api.anthropic.com/v1/messages',{
+    const res=await fetch('https://api.anthropic.com/v1/messages',{
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({
-        model:'claude-sonnet-4-6',
-        max_tokens:2000,
+        model:'claude-sonnet-4-6', max_tokens:2000,
         messages:[{role:'user',content:[
-          {type:'image',source:{type:'base64',media_type:mimeType,data:b64}},
-          {type:'text',text:prompt}
+          {type:'image',source:{type:'base64',media_type:mime,data:b64}},
+          {type:'text',text:`Analiza esta boleta de supermercado chileno. Extrae TODOS los productos con cantidad y precio final (con descuentos aplicados). Ignora subtotales, IVA, puntos, datos del cliente.
+Responde SOLO JSON sin texto adicional:
+{"store":"tienda","date":"dd/mm/aa","items":[{"name":"nombre producto","qty":1,"unit":"un","price":1990}]}`}
         ]}]
       })
     });
-    await handleAIResponse(res);
+    if(!res.ok) throw new Error('HTTP '+res.status);
+    const data=await res.json();
+    const raw=(data.content?.[0]?.text||'').replace(/```json|```/g,'').trim();
+    let parsed;
+    try{ parsed=JSON.parse(raw); }catch(e){ parsed={error:'No se pudo leer la respuesta.'}; }
+    showBoletaResult(parsed);
   } catch(err){
-    showFileError('Error conectando con la IA: '+err.message);
+    // Si falla la API (CORS/red), intentar con parser local si es posible
+    showFileError('No se pudo conectar con la IA. Sube el PDF de la boleta en cambio — funciona sin internet.');
   }
-}
-
-/* ── CLAUDE: analizar TEXTO extraído del PDF ── */
-async function analyzeTextWithAI(pdfText, filename){
-  const prompt = buildPrompt(pdfText);
-  try{
-    const res = await fetch('https://api.anthropic.com/v1/messages',{
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({
-        model:'claude-sonnet-4-6',
-        max_tokens:2000,
-        messages:[{role:'user',content:[
-          {type:'text',text:prompt}
-        ]}]
-      })
-    });
-    await handleAIResponse(res);
-  } catch(err){
-    showFileError('Error conectando con la IA: '+err.message);
-  }
-}
-
-function buildPrompt(pdfText){
-  const base = `Eres un asistente experto en boletas de supermercados chilenos (Jumbo, Lider, Tottus, Unimarc, Santa Isabel).
-Analiza el contenido y extrae TODOS los productos comprados con su cantidad y precio final (después de descuentos).
-Ignora subtotales, descuentos globales, IVA, puntos y datos del cliente.
-Responde SOLO en JSON válido, sin texto adicional ni bloques de código markdown. Formato exacto:
-{"store":"nombre supermercado","date":"fecha dd/mm/aa","items":[{"name":"nombre legible del producto","qty":1,"unit":"un","price":1990}]}
-Si no hay productos responde: {"error":"No se encontraron productos"}`;
-
-  if(pdfText){
-    return base + `\n\nTEXTO DE LA BOLETA:\n${pdfText}`;
-  }
-  return base + '\nAnaliza la imagen de la boleta adjunta.';
-}
-
-async function handleAIResponse(res){
-  if(!res.ok){
-    const errBody = await res.text().catch(()=>'');
-    // CORS o error de red
-    if(res.status===0 || errBody.includes('CORS') || res.status===403){
-      showFileError('Error de red (CORS). La API no está disponible desde este navegador. Intenta desde la app web.');
-    } else {
-      showFileError('Error de la IA ('+res.status+'). Intenta nuevamente.');
-    }
-    return;
-  }
-  const data = await res.json();
-  const raw = (data.content?.[0]?.text||'').replace(/```json|```/g,'').trim();
-  let parsed;
-  try{ parsed=JSON.parse(raw); }
-  catch(e){ parsed={error:'No se pudo interpretar la respuesta. Intenta con una imagen más clara.'}; }
-  showBoletaResult(parsed);
 }
 
 function showBoletaResult(parsed){
