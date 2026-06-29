@@ -2,7 +2,10 @@
 <html lang="es">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="theme-color" content="#ffffff">
 <title>ListaJuntos 🛒</title>
 <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;500;600;700;800;900&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
@@ -304,8 +307,102 @@ td{padding:10px 13px;font-size:12px;font-weight:600;border-bottom:1px solid var(
 tr:last-child td{border-bottom:none}
 tr:hover td{background:var(--bg)}
 
-@media(max-width:900px){.srow{grid-template-columns:repeat(2,1fr)}.row{flex-direction:column}.fg.fixed-120,.fg.fixed-140,.fg.fixed-100{flex:1}.sgrid{grid-template-columns:repeat(3,1fr)}.debt-summary{grid-template-columns:1fr}}
-@media(max-width:600px){.srow{grid-template-columns:1fr 1fr}.pgrid{grid-template-columns:1fr}.inv-grid{grid-template-columns:1fr 1fr}}
+
+/* ─── BOTTOM NAV (móvil / iOS) ─── */
+.bottom-nav{
+  display:none;
+  position:fixed;bottom:0;left:0;right:0;z-index:400;
+  background:rgba(255,255,255,.97);
+  backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);
+  border-top:1px solid var(--border);
+  padding:6px 0 calc(6px + env(safe-area-inset-bottom));
+  box-shadow:0 -4px 20px rgba(0,0,0,.08);
+}
+.bnav-items{display:flex;justify-content:space-around;align-items:stretch}
+.bnav-item{
+  display:flex;flex-direction:column;align-items:center;gap:2px;
+  padding:4px 6px;flex:1;cursor:pointer;border:none;background:none;
+  font-family:'Nunito',sans-serif;color:var(--muted);transition:color .15s;
+  -webkit-tap-highlight-color:transparent;position:relative;
+}
+.bnav-item.on{color:var(--green)}
+.bnav-icon{font-size:20px;line-height:1}
+.bnav-label{font-size:9px;font-weight:800;letter-spacing:.3px;white-space:nowrap}
+.bnav-dot{
+  position:absolute;top:2px;right:calc(50% - 16px);
+  width:7px;height:7px;border-radius:50%;border:1.5px solid var(--white);
+}
+.bnav-dot.red{background:var(--red)}.bnav-dot.grn{background:var(--green-l)}.bnav-dot.ora{background:var(--orange)}
+
+/* ─── RESPONSIVE ─── */
+@media(max-width:900px){
+  .srow{grid-template-columns:repeat(2,1fr)}
+  .row{flex-direction:column}
+  .fg.fixed-120,.fg.fixed-140,.fg.fixed-100{flex:1;min-width:0}
+  .sgrid{grid-template-columns:repeat(3,1fr)}
+  .debt-summary{grid-template-columns:1fr}
+  .hright .sync span{display:none}
+}
+
+@media(max-width:700px){
+  /* Ocultar nav de header, mostrar bottom nav */
+  .hnav{display:none}
+  .bottom-nav{display:block}
+  /* Dar espacio al bottom nav */
+  body{padding-bottom:calc(64px + env(safe-area-inset-bottom))}
+  /* Header compacto */
+  header{
+    height:54px;padding:0 14px;gap:10px;
+    justify-content:space-between;
+  }
+  .logo-txt{font-size:16px}
+  .logo-box{width:30px;height:30px;font-size:16px}
+  .hright{gap:6px}
+  .hright .sync{padding:3px 8px;font-size:10px}
+  .usw .uopt span{display:none}
+  .usw .uopt{padding:4px 8px}
+  /* Páginas con padding-top correcto */
+  .page{padding:14px 14px}
+  /* Stats 2 columnas en móvil */
+  .srow{grid-template-columns:1fr 1fr;gap:8px;margin-bottom:14px}
+  .sc{padding:12px 13px}
+  .sc-i{font-size:20px;margin-bottom:4px}
+  .sc-v{font-size:18px}
+  /* Grids en 1 columna */
+  .pgrid{grid-template-columns:1fr 1fr}
+  .inv-grid{grid-template-columns:1fr 1fr}
+  .cat-grid{grid-template-columns:1fr}
+  /* Formularios */
+  .add-form-mobile{display:flex;flex-direction:column;gap:8px}
+  .boleta-card{padding:16px}
+  .upload-zone{padding:24px 14px}
+  /* Tablas scroll horizontal */
+  .htw{overflow-x:auto;-webkit-overflow-scrolling:touch}
+  table{min-width:500px}
+  /* Deudas */
+  .dcard{flex-wrap:wrap;gap:10px}
+  .dinfo{min-width:0;flex:1}
+}
+
+@media(max-width:400px){
+  .pgrid{grid-template-columns:1fr}
+  .inv-grid{grid-template-columns:1fr}
+  .srow{grid-template-columns:1fr 1fr}
+}
+
+/* ─── iOS Safari fixes ─── */
+/* Evitar zoom al hacer focus en inputs */
+@supports(-webkit-touch-callout:none){
+  input,select,textarea{font-size:16px !important}
+}
+/* Safe area para notch/home indicator */
+.page{padding-left:max(14px, env(safe-area-inset-left));padding-right:max(14px, env(safe-area-inset-right))}
+header{padding-left:max(20px, env(safe-area-inset-left));padding-right:max(20px, env(safe-area-inset-right))}
+/* Evitar bounce scroll que desplaza la página */
+html{height:-webkit-fill-available}
+body{min-height:-webkit-fill-available;-webkit-overflow-scrolling:touch}
+/* Fix position:sticky en iOS */
+header{-webkit-position:sticky;position:sticky}
 </style>
 </head>
 <body>
@@ -317,12 +414,12 @@ tr:hover td{background:var(--bg)}
   </a>
   <div class="hnav">
     <div class="pills">
-      <button class="pill on" onclick="nav('inv',this)">🏠 Inventario <span class="pbadge pb-ora" id="warnBadge" style="display:none">!</span></button>
-      <button class="pill" onclick="nav('boleta',this)">📄 Escanear Boleta</button>
-      <button class="pill" onclick="nav('lista',this)">📋 Lista <span class="pbadge pb-grn" id="pendBadge">0</span></button>
-      <button class="pill" onclick="nav('deudas',this)">💸 Deudas <span class="pbadge pb-red" id="debtBadge" style="display:none">!</span></button>
-      <button class="pill" onclick="nav('precios',this)">💰 Precios</button>
-      <button class="pill" onclick="nav('historial',this)">📅 Historial</button>
+      <button class="pill on" onclick="nav('inv',this,null)">🏠 Inventario <span class="pbadge pb-ora" id="warnBadge" style="display:none">!</span></button>
+      <button class="pill" onclick="nav('boleta',this,null)">📄 Escanear Boleta</button>
+      <button class="pill" onclick="nav('lista',this,null)">📋 Lista <span class="pbadge pb-grn" id="pendBadge">0</span></button>
+      <button class="pill" onclick="nav('deudas',this,null)">💸 Deudas <span class="pbadge pb-red" id="debtBadge" style="display:none">!</span></button>
+      <button class="pill" onclick="nav('precios',this,null)">💰 Precios</button>
+      <button class="pill" onclick="nav('historial',this,null)">📅 Historial</button>
     </div>
   </div>
   <div class="hright">
@@ -334,7 +431,38 @@ tr:hover td{background:var(--bg)}
   </div>
 </header>
 
-<!-- ══ INVENTARIO ══ -->
+<!-- BOTTOM NAV (móvil / iOS) -->
+<nav class="bottom-nav" role="navigation" aria-label="Navegación principal">
+  <div class="bnav-items">
+    <button class="bnav-item on" id="bn-inv" onclick="nav('inv',null,this)" aria-label="Inventario">
+      <span class="bnav-icon">🏠</span>
+      <span class="bnav-label">Inventario</span>
+      <span class="bnav-dot ora" id="bnWarn" style="display:none"></span>
+    </button>
+    <button class="bnav-item" id="bn-boleta" onclick="nav('boleta',null,this)" aria-label="Escanear Boleta">
+      <span class="bnav-icon">📄</span>
+      <span class="bnav-label">Boleta</span>
+    </button>
+    <button class="bnav-item" id="bn-lista" onclick="nav('lista',null,this)" aria-label="Lista de compras">
+      <span class="bnav-icon">📋</span>
+      <span class="bnav-label">Lista</span>
+      <span class="bnav-dot grn" id="bnPend" style="display:none"></span>
+    </button>
+    <button class="bnav-item" id="bn-deudas" onclick="nav('deudas',null,this)" aria-label="Deudas">
+      <span class="bnav-icon">💸</span>
+      <span class="bnav-label">Deudas</span>
+      <span class="bnav-dot red" id="bnDebt" style="display:none"></span>
+    </button>
+    <button class="bnav-item" id="bn-precios" onclick="nav('precios',null,this)" aria-label="Precios">
+      <span class="bnav-icon">💰</span>
+      <span class="bnav-label">Precios</span>
+    </button>
+    <button class="bnav-item" id="bn-historial" onclick="nav('historial',null,this)" aria-label="Historial">
+      <span class="bnav-icon">📅</span>
+      <span class="bnav-label">Historial</span>
+    </button>
+  </div>
+</nav>
 <div class="page on" id="page-inv">
   <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;flex-wrap:wrap;gap:10px">
     <div class="ptitle" style="margin:0">🏠 Inventario de la casa</div>
@@ -419,10 +547,10 @@ tr:hover td{background:var(--bg)}
     <div style="font-size:13px;font-weight:800;margin-bottom:16px;display:flex;align-items:center;gap:7px">🤖 Sube una foto de tu boleta y la IA extrae los productos automáticamente</div>
 
     <div class="upload-zone" id="dropZone" onclick="document.getElementById('fileInput').click()" ondragover="drag(event)" ondragleave="undrag(event)" ondrop="drop(event)">
-      <input type="file" id="fileInput" accept="image/*" onchange="handleFile(event)">
+      <input type="file" id="fileInput" accept="image/*,image/jpeg,image/png,image/webp,image/heic,image/heif,application/pdf,.pdf" onchange="handleFile(event)">
       <div class="upload-icon">🧾</div>
-      <div class="upload-title">Arrastra tu boleta aquí o haz clic para subir</div>
-      <div class="upload-sub">Soporta fotos de boletas Jumbo, Líder, Tottus, Unimarc, Santa Isabel</div>
+      <div class="upload-title">Arrastra tu boleta o haz clic para subir</div>
+      <div class="upload-sub">📸 Foto (JPG, PNG, HEIC) &nbsp;·&nbsp; 📄 PDF &nbsp;·&nbsp; Compatible con Jumbo, Líder, Tottus, Unimarc</div>
     </div>
 
     <div class="or-divider">O</div>
@@ -774,11 +902,23 @@ function todayFmt(){ return new Date().toLocaleDateString('es-CL'); }
 // ════════════════════════════════════════════
 //  NAVEGACIÓN
 // ════════════════════════════════════════════
-function nav(id,btn){
+function nav(id, topBtn, botBtn){
   document.querySelectorAll('.page').forEach(p=>p.classList.remove('on'));
   document.querySelectorAll('.pill').forEach(b=>b.classList.remove('on'));
+  document.querySelectorAll('.bnav-item').forEach(b=>b.classList.remove('on'));
   document.getElementById('page-'+id).classList.add('on');
-  if(btn) btn.classList.add('on');
+  if(topBtn) topBtn.classList.add('on');
+  if(botBtn) botBtn.classList.add('on');
+  // Sincronizar top pill con bottom nav
+  const pillMap={inv:0,boleta:1,lista:2,deudas:3,precios:4,historial:5};
+  if(pillMap[id]!==undefined){
+    const pills=document.querySelectorAll('.pill');
+    if(pills[pillMap[id]]) pills[pillMap[id]].classList.add('on');
+  }
+  const bnMap={inv:'bn-inv',boleta:'bn-boleta',lista:'bn-lista',deudas:'bn-deudas',precios:'bn-precios',historial:'bn-historial'};
+  if(bnMap[id]) document.getElementById(bnMap[id])?.classList.add('on');
+  // Scroll to top on page change
+  window.scrollTo({top:0,behavior:'smooth'});
   const fn={inv:()=>{renderCatalog();renderInv();},lista:()=>{renderList();updateListStats();},deudas:renderDeudas,precios:renderCmp,historial:renderHistorial,boleta:renderBoletaHistory};
   if(fn[id]) fn[id]();
 }
@@ -915,6 +1055,9 @@ function renderInv(){
   const warn=low+out;
   const lb=document.getElementById('warnBadge');
   lb.style.display=warn>0?'':'none'; lb.textContent=warn;
+  // Bottom nav
+  const bnWarn=document.getElementById('bnWarn');
+  if(bnWarn) bnWarn.style.display=warn>0?'block':'none';
   document.getElementById('lastInvTxt').textContent=lastInvDate
     ?'Último inventario: '+lastInvDate+' — por '+currentUser
     :'Sin inventario registrado — agrega tus primeros productos arriba';
@@ -978,54 +1121,90 @@ function renderInv(){
 // ════════════════════════════════════════════
 function drag(e){ e.preventDefault(); document.getElementById('dropZone').classList.add('drag'); }
 function undrag(e){ e.preventDefault(); document.getElementById('dropZone').classList.remove('drag'); }
-function drop(e){ e.preventDefault(); undrag(e); const f=e.dataTransfer.files[0]; if(f) processImage(f); }
-function handleFile(e){ const f=e.target.files[0]; if(f) processImage(f); }
+function drop(e){ e.preventDefault(); undrag(e); const f=e.dataTransfer.files[0]; if(f) handleFile({target:{files:[f]}}); }
+function handleFile(e){ const f=e.target.files[0]; if(f) processFile(f); }
+
+function processFile(file){
+  const isPDF = file.type==='application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+  document.getElementById('boletaResult').style.display='block';
+  document.getElementById('scanBar').style.display='block';
+  document.getElementById('scanStatus').textContent='🤖 '+(isPDF?'Leyendo PDF...':'Analizando imagen...');
+  document.getElementById('resultItems').innerHTML='';
+  document.getElementById('addAllBtn').style.display='none';
+  document.getElementById('boletaImg').style.display='none';
+
+  if(isPDF){
+    processPDF(file);
+  } else {
+    processImage(file);
+  }
+}
 
 function processImage(file){
   const reader=new FileReader();
-  reader.onload=function(e){
+  reader.onload=function(ev){
     const img=document.getElementById('boletaImg');
-    img.src=e.target.result;
+    img.src=ev.target.result;
     img.style.display='block';
-    document.getElementById('boletaResult').style.display='block';
-    document.getElementById('scanBar').style.display='block';
-    document.getElementById('scanStatus').textContent='🤖 Analizando boleta con IA...';
-    document.getElementById('resultItems').innerHTML='';
-    document.getElementById('addAllBtn').style.display='none';
-    // Llamar a la API de Claude para analizar la imagen
-    analyzeBoletaWithAI(e.target.result, file.type||'image/jpeg');
+    // Determine media type - iOS HEIC support
+    let mimeType=file.type||'image/jpeg';
+    if(mimeType==='image/heic'||mimeType==='image/heif') mimeType='image/jpeg';
+    analyzeWithAI(ev.target.result, mimeType, 'image');
   };
   reader.readAsDataURL(file);
 }
 
-async function analyzeBoletaWithAI(base64data, mimeType){
+function processPDF(file){
+  // Para PDF: mostrar ícono de PDF y enviar como document a Claude
+  document.getElementById('boletaImg').style.display='none';
+  const reader=new FileReader();
+  reader.onload=function(ev){
+    // Mostrar preview de PDF
+    const img=document.getElementById('boletaImg');
+    img.src='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 80"><rect width="120" height="80" fill="%23FEF2F2" rx="8"/><text x="60" y="35" text-anchor="middle" font-size="28">📄</text><text x="60" y="55" text-anchor="middle" font-size="10" fill="%23DC2626" font-weight="bold">PDF cargado</text><text x="60" y="67" text-anchor="middle" font-size="8" fill="%238591B4">'+file.name.substring(0,30)+'</text></svg>';
+    img.style.display='block';
+    analyzeWithAI(ev.target.result, 'application/pdf', 'pdf');
+  };
+  reader.readAsDataURL(file);
+}
+
+async function analyzeWithAI(base64data, mimeType, fileType){
   const b64 = base64data.replace(/^data:[^;]+;base64,/, '');
+  const prompt = `Eres un asistente que analiza boletas de supermercados chilenos. Extrae TODOS los productos con su cantidad y precio unitario. Responde SOLO en JSON válido, sin texto adicional ni bloques de código. Formato exacto:
+{"store":"nombre supermercado","date":"fecha si aparece","items":[{"name":"nombre producto","qty":1,"unit":"un","price":1990}]}
+Si no es una boleta responde: {"error":"No se detectó una boleta válida"}`;
+
   try {
+    let contentBlock;
+    if(fileType==='pdf'){
+      contentBlock = {type:'document',source:{type:'base64',media_type:'application/pdf',data:b64}};
+    } else {
+      // Asegurar tipo de imagen válido para la API
+      const validTypes=['image/jpeg','image/png','image/gif','image/webp'];
+      const apiMime = validTypes.includes(mimeType)?mimeType:'image/jpeg';
+      contentBlock = {type:'image',source:{type:'base64',media_type:apiMime,data:b64}};
+    }
+
     const res = await fetch('https://api.anthropic.com/v1/messages',{
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({
         model:'claude-sonnet-4-6',
-        max_tokens:1000,
-        messages:[{
-          role:'user',
-          content:[
-            {type:'image',source:{type:'base64',media_type:mimeType,data:b64}},
-            {type:'text',text:`Eres un asistente que analiza boletas de supermercados chilenos. Extrae TODOS los productos de esta boleta con su cantidad y precio unitario. Responde SOLO en JSON, sin texto adicional, sin bloques de código markdown. Formato exacto:
-{"store":"nombre supermercado","date":"fecha si aparece","items":[{"name":"nombre producto","qty":1,"unit":"un","price":1990}]}
-Si no hay boleta visible responde: {"error":"No se detectó una boleta válida"}`}
-          ]
-        }]
+        max_tokens:1500,
+        messages:[{role:'user',content:[contentBlock,{type:'text',text:prompt}]}]
       })
     });
+
+    if(!res.ok){ throw new Error('API error '+res.status); }
     const data=await res.json();
-    const raw=data.content?.[0]?.text||'';
+    const raw=(data.content?.[0]?.text||'').replace(/```json|```/g,'').trim();
     let parsed;
-    try { parsed=JSON.parse(raw.replace(/```json|```/g,'').trim()); } catch(e){ parsed={error:'No se pudo leer la respuesta'}; }
+    try{ parsed=JSON.parse(raw); }catch(e){ parsed={error:'No se pudo procesar la respuesta. Intenta con una imagen más clara.'}; }
     showBoletaResult(parsed);
-  } catch(e){
+  } catch(err){
     document.getElementById('scanBar').style.display='none';
-    document.getElementById('scanStatus').textContent='⚠️ Error al conectar con la IA. Verifica tu conexión.';
+    document.getElementById('scanStatus').textContent='⚠️ Error: '+(err.message.includes('API')?'Error conectando con IA. Verifica tu conexión.':err.message);
+    console.error('Boleta AI error:',err);
   }
 }
 
@@ -1194,6 +1373,10 @@ function updateListStats(){
   document.getElementById('lBSub').textContent=products.filter(p=>p.bought).length+' listos';
   document.getElementById('lSaved').textContent='$'+Math.round(saved).toLocaleString('es-CL');
   document.getElementById('pendBadge').textContent=products.filter(p=>!p.bought).length;
+  // Bottom nav badges
+  const pend=products.filter(p=>!p.bought).length;
+  const bnPend=document.getElementById('bnPend');
+  if(bnPend) bnPend.style.display=pend>0?'block':'none';
   const bEl=document.getElementById('lBal');
   if(diff<500){ bEl.textContent='✅ Par'; bEl.className='sc-v vg'; bEl.style.fontSize='20px'; }
   else { const q=fP>mP?'Melisa':'Felipe'; bEl.textContent=q+' debe'; bEl.className='sc-v vo'; bEl.style.fontSize='15px'; }
@@ -1263,6 +1446,9 @@ function renderDeudas(){
   const debtBadge=document.getElementById('debtBadge');
   const pendDebt=debts.filter(d=>!d.paid).length;
   debtBadge.style.display=pendDebt>0?'':'none'; debtBadge.textContent=pendDebt;
+  // Bottom nav
+  const bnDebt=document.getElementById('bnDebt');
+  if(bnDebt) bnDebt.style.display=pendDebt>0?'block':'none';
 
   document.getElementById('balancePill').innerHTML= diff<500
     ?`<div class="balance-pill bp-ok" style="margin-bottom:16px"><span style="font-size:22px">🤝</span><span style="font-size:13px;font-weight:700">¡Balance equilibrado! Diferencia menor a $500.</span></div>`
