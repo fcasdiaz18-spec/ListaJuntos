@@ -723,6 +723,22 @@ header{-webkit-position:sticky;position:sticky}
   </div>
 </div>
 
+<!-- MODAL: días de duración -->
+<div class="overlay" id="durationModal">
+  <div class="modal">
+    <div class="modal-title">⏳ ¿Cuántos días dura esta porción?</div>
+    <div style="font-size:12px;color:var(--muted);font-weight:600;margin-bottom:14px" id="durationModalSub">Esto nos ayuda a calcular cuándo se te acabará el producto.</div>
+    <div class="row">
+      <div class="fg"><label>Días que dura 1 unidad/porción</label><input id="durDays" type="number" placeholder="Ej: 7 (una leche dura 7 días)" min="0"></div>
+    </div>
+    <div style="font-size:11px;color:var(--muted);margin-top:8px;font-weight:600">Déjalo vacío si no quieres calcular la duración para este producto.</div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost btn-sm" onclick="skipDuration()">Omitir</button>
+      <button class="btn btn-t btn-sm" onclick="confirmDuration()">✅ Guardar</button>
+    </div>
+  </div>
+</div>
+
 <script>
 // ════════════════════════════════════════════
 //  CATÁLOGO COMPLETO DE PRODUCTOS CHILE
@@ -854,9 +870,77 @@ const IMGS = {
   fideos:'https://images.unsplash.com/photo-1555949258-eb67b1ef0ceb?w=300&q=75',
   agua:'https://images.unsplash.com/photo-1548839140-29a749e1cf4d?w=300&q=75',
   papel:'https://images.unsplash.com/photo-1584556812952-905ffd0c611a?w=300&q=75',
+  helado:'https://images.unsplash.com/photo-1497034825429-c343d7c6a68f?w=300&q=75',
+  pizza:'https://images.unsplash.com/photo-1565299624946-b28f40a0ae38?w=300&q=75',
   default:'https://images.unsplash.com/photo-1542838132-92c53300491e?w=300&q=75',
 };
 function gimg(key){ return IMGS[key] || IMGS.default; }
+
+// Mapeo robusto de nombre de producto -> imagen, usado tanto para catálogo como para
+// productos agregados manualmente o desde boleta (que no tienen imgKey directo).
+const NAME_IMG_RULES=[
+  [/leche|nido|ideal\s?sin\s?lactosa/i,'leche'],
+  [/yogurt|yogur/i,'yogurt'],
+  [/mantequilla/i,'mantequilla'],
+  [/queso/i,'queso'],
+  [/pan\b|hamburgu|marraqueta|molde/i,'pan'],
+  [/galleta/i,'pan'],
+  [/pollo|pechuga|ave\b/i,'pollo'],
+  [/vacuno|filete|lomo|costilla|panceta|cerdo|tocino|longaniza|vienesa|salchich[oó]n|jam[oó]n|jam\s|carne/i,'carne'],
+  [/salm[oó]n|pescado/i,'salmon'],
+  [/arroz/i,'arroz'],
+  [/fideo|spaghetti|pasta/i,'fideos'],
+  [/aceite/i,'aceite'],
+  [/tomate/i,'tomates'],
+  [/lechuga|cebolla|zanahoria|papa\b|verdura|hidropon/i,'verdura'],
+  [/pl[aá]tano|manzana|naranja|fruta/i,'fruta'],
+  [/detergente|cloro|lavavajilla|limpiapiso|suavizante|esponja|vinagre/i,'detergen'],
+  [/papel\s?(higi[eé]nico|confort|scottex|nova)/i,'papel'],
+  [/coca|pepsi|cerveza|bebida|jugo|gaseosa|energy/i,'coca'],
+  [/agua\s?(vital|cachant)/i,'agua'],
+  [/caf[eé]\b|nescaf/i,'cafe'],
+  [/t[eé]\s|helado\s?durazno|t[eé]$/i,'cafe'],
+  [/mayonesa|postre|manjar/i,'default'],
+  [/pizza/i,'pizza'],
+  [/papas?\sfritas|mccain/i,'pollo'],
+  [/helado/i,'helado'],
+];
+function smartImg(name){
+  if(!name) return IMGS.default;
+  for(const [re,key] of NAME_IMG_RULES){ if(re.test(name)) return gimg(key); }
+  return IMGS.default;
+}
+function smartEmoji(name){
+  if(!name) return '📦';
+  const n=name.toLowerCase();
+  if(/leche|yogurt|yogur|mantequilla|queso/.test(n)) return n.includes('queso')?'🧀':n.includes('mantequilla')?'🧈':n.includes('yogurt')?'🥣':'🥛';
+  if(/pan\b|hamburgu|marraqueta|molde|galleta/.test(n)) return n.includes('galleta')?'🍪':'🍞';
+  if(/pollo|pechuga|ave\b/.test(n)) return '🍗';
+  if(/vacuno|filete|lomo|costilla|panceta|cerdo|tocino|longaniza|vienesa|salchich|jam[oó]n|jam\s|carne/.test(n)) return '🥩';
+  if(/salm[oó]n|pescado/.test(n)) return '🐟';
+  if(/arroz/.test(n)) return '🍚';
+  if(/fideo|spaghetti|pasta/.test(n)) return '🍝';
+  if(/aceite/.test(n)) return '🫙';
+  if(/tomate/.test(n)) return '🍅';
+  if(/lechuga|cebolla|zanahoria|papa\b|verdura|hidropon/.test(n)) return '🥬';
+  if(/pl[aá]tano/.test(n)) return '🍌';
+  if(/manzana/.test(n)) return '🍎';
+  if(/naranja/.test(n)) return '🍊';
+  if(/detergente|cloro|lavavajilla|limpiapiso|suavizante|esponja/.test(n)) return '🧴';
+  if(/vinagre/.test(n)) return '🧴';
+  if(/papel/.test(n)) return '🧻';
+  if(/coca|pepsi|gaseosa|energy/.test(n)) return '🥤';
+  if(/cerveza/.test(n)) return '🍺';
+  if(/jugo/.test(n)) return '🧃';
+  if(/agua/.test(n)) return '💧';
+  if(/caf[eé]\b|nescaf/.test(n)) return '☕';
+  if(/t[eé]\b/.test(n)) return '🍵';
+  if(/helado/.test(n)) return '🍦';
+  if(/pizza/.test(n)) return '🍕';
+  if(/mayonesa/.test(n)) return '🥫';
+  if(/postre|manjar/.test(n)) return '🍮';
+  return '📦';
+}
 
 const SCOL={Jumbo:'#E8312A','Jumbo Prime':'#1a1464',Lider:'#004B87',Tottus:'#E63C2F',Unimarc:'#0066B3'};
 const SRIB={Jumbo:'#E8312A','Jumbo Prime':'#1a1464',Lider:'#004B87',Tottus:'#E63C2F',Unimarc:'#0066B3'};
@@ -974,8 +1058,9 @@ function confirmAddCat(){
   if(!catModalProd) return;
   const qty=parseFloat(document.getElementById('catQty').value)||1;
   const unit=document.getElementById('catUnit').value;
-  addInvItem(catModalProd.name, catModalProd.brand, catModalProd.cat, qty, unit, catModalProd.emoji, catModalProd.img, catModalProd.id);
   closeModal();
+  pendingInvAdd={name:catModalProd.name,brand:catModalProd.brand,cat:catModalProd.cat,qty,unit,emoji:catModalProd.emoji,imgKey:catModalProd.img,catId:catModalProd.id};
+  openDurationModal(catModalProd.name);
 }
 
 function addManual(){
@@ -984,15 +1069,45 @@ function addManual(){
   const qty=parseFloat(document.getElementById('mQty').value)||1;
   const unit=document.getElementById('mUnit').value;
   if(!name){ toast('⚠️ Ingresa el nombre'); return; }
-  addInvItem(name,'',cat,qty,unit,'📦','default',null);
   document.getElementById('mName').value='';
   document.getElementById('mQty').value='1';
+  pendingInvAdd={name,brand:'',cat,qty,unit,emoji:null,imgKey:null,catId:null};
+  openDurationModal(name);
 }
 
-function addInvItem(name,brand,cat,qty,unit,emoji,imgKey,catId){
+let pendingInvAdd=null;
+function openDurationModal(name){
+  document.getElementById('durationModalSub').textContent='Para "'+name+'" — esto nos ayuda a calcular cuándo se te acabará.';
+  document.getElementById('durDays').value='';
+  document.getElementById('durationModal').classList.add('open');
+}
+function closeDurationModal(){ document.getElementById('durationModal').classList.remove('open'); }
+
+function confirmDuration(){
+  const days=parseFloat(document.getElementById('durDays').value)||null;
+  finalizeInvAdd(days);
+}
+function skipDuration(){ finalizeInvAdd(null); }
+
+function finalizeInvAdd(daysDuration){
+  if(!pendingInvAdd){ closeDurationModal(); return; }
+  const p=pendingInvAdd;
+  addInvItem(p.name,p.brand,p.cat,p.qty,p.unit,p.emoji,p.imgKey,p.catId,daysDuration);
+  pendingInvAdd=null;
+  closeDurationModal();
+}
+
+function addInvItem(name,brand,cat,qty,unit,emoji,imgKey,catId,daysDuration){
   const existing=inventario.find(i=>i.name.toLowerCase()===name.toLowerCase());
-  if(existing){ existing.qty+=qty; existing.lastUpdate=today(); saveAll('inv',inventario); renderInv(); toast('📦 +'+qty+' '+name); return; }
-  inventario.push({id:nIId++,name,brand:brand||'',cat,qty,unit,emoji:emoji||'📦',imgKey:imgKey||'default',catId:catId||null,addedBy:currentUser,date:today(),lastUpdate:today()});
+  if(existing){ existing.qty+=qty; existing.lastUpdate=today(); if(daysDuration) existing.daysDuration=daysDuration; saveAll('inv',inventario); renderInv(); toast('📦 +'+qty+' '+name); return; }
+  inventario.push({
+    id:nIId++, name, brand:brand||'', cat, qty, unit,
+    emoji: emoji||smartEmoji(name),
+    imgKey: imgKey||null, // si no hay imgKey de catálogo, smartImg() decide en render
+    catId: catId||null,
+    addedBy:currentUser, date:today(), lastUpdate:today(),
+    daysDuration: daysDuration||null
+  });
   saveAll('inv',inventario);
   renderInv();
   toast('📦 '+name+' agregado');
@@ -1037,6 +1152,34 @@ function exportInv(){
 }
 
 function invSt(qty){ if(qty===0) return {label:'Agotado',cls:'st-out',card:'out'}; if(qty<=1) return {label:'Stock bajo',cls:'st-low',card:'low'}; return {label:'OK',cls:'st-ok',card:''}; }
+
+/* Calcula en cuántos días se estima que se acabará el producto, según
+   cuántos días dura una unidad/porción (dato que el usuario ingresa al agregar). */
+function daysRemaining(item){
+  if(!item.daysDuration || item.daysDuration<=0) return null;
+  const totalDays = item.qty * item.daysDuration;
+  return Math.round(totalDays);
+}
+function estimatedRunOutDate(item){
+  const days=daysRemaining(item);
+  if(days===null) return null;
+  const d=new Date(item.lastUpdate||today());
+  d.setDate(d.getDate()+days);
+  return d;
+}
+function renderDurationInfo(item){
+  if(!item.daysDuration) return '';
+  const days=daysRemaining(item);
+  const runOut=estimatedRunOutDate(item);
+  if(days===null||!runOut) return '';
+  const fmt=runOut.toLocaleDateString('es-CL',{day:'2-digit',month:'short'});
+  let urgency='var(--green)', bg='var(--green-bg)', bd='var(--green-br)';
+  if(days<=3){ urgency='var(--red)'; bg='var(--red-bg)'; bd='var(--red-br)'; }
+  else if(days<=7){ urgency='var(--yellow)'; bg='var(--yel-bg)'; bd='var(--yel-br)'; }
+  return `<div style="margin:6px 0;padding:5px 8px;background:${bg};border:1px solid ${bd};border-radius:7px;font-size:10px;font-weight:700;color:${urgency};display:flex;align-items:center;gap:5px">
+    ⏳ ${days<=0?'Se acabaría hoy':'~'+days+' día'+(days===1?'':'s')+' restante'+(days===1?'':'s')} · agotará ~${fmt}
+  </div>`;
+}
 
 function groupByCat(arr){
   const g={};
@@ -1092,8 +1235,8 @@ function renderInv(){
           return `<div class="icard ${st.card}${cart?' incart':''}">
             <button class="idel" onclick="removeInv(${item.id})">🗑️</button>
             <div class="icard-top">
-              <img class="iimg" src="${gimg(item.imgKey)}" alt="${item.name}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
-              <div class="iemoji" style="display:none">${item.emoji||'📦'}</div>
+              <img class="iimg" src="${item.imgKey?gimg(item.imgKey):smartImg(item.name)}" alt="${item.name}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
+              <div class="iemoji" style="display:none">${item.emoji||smartEmoji(item.name)}</div>
               <div style="flex:1;min-width:0">
                 <div class="iname">${item.name}</div>
                 ${item.brand?`<div class="ibrand">${item.brand}</div>`:''}
@@ -1107,6 +1250,7 @@ function renderInv(){
               <button class="qb" onclick="changeQty(${item.id},1)">+</button>
             </div>
             <span class="ist ${st.cls}">${st.label}</span>
+            ${renderDurationInfo(item)}
             <div class="ifoot">
               ${cart?`<span class="cart-tag">🛒 En lista</span>`:'<span></span>'}
               <div class="idate">📅 ${item.lastUpdate}</div>
@@ -1153,7 +1297,7 @@ function processFile(file){
   if(isPDF) processPDF(file); else processImage(file);
 }
 
-/* ─── PDF: extracción local con PDF.js ─── */
+/* ─── PDF: extracción local con PDF.js, agrupando por posición Y real ─── */
 async function processPDF(file){
   const box=document.getElementById('pdfPreviewBox');
   box.innerHTML=`<div style="text-align:center;padding:14px">
@@ -1168,15 +1312,36 @@ async function processPDF(file){
     const buf = await file.arrayBuffer();
     setStatus('📄 Extrayendo texto...','var(--muted)');
     const pdf = await pdfjsLib.getDocument({data:new Uint8Array(buf)}).promise;
-    let text='';
+
+    // Reconstruir líneas reales usando la posición Y de cada fragmento de texto.
+    // PDF.js entrega cada palabra/token como un item separado — unirlos con espacio
+    // pierde la estructura de línea. Agrupamos por Y (con tolerancia) y ordenamos por X.
+    let allLines=[];
     for(let p=1;p<=pdf.numPages;p++){
       const page=await pdf.getPage(p);
       const content=await page.getTextContent();
-      text+=content.items.map(i=>i.str).join('\n')+'\n';
+      const items=content.items.filter(it=>it.str&&it.str.trim());
+      // Agrupar por coordenada Y (redondeada) para formar líneas
+      const rows={};
+      items.forEach(it=>{
+        const y=Math.round(it.transform[5]); // posición vertical
+        const x=it.transform[4]; // posición horizontal
+        const key=y;
+        if(!rows[key]) rows[key]=[];
+        rows[key].push({x,str:it.str});
+      });
+      // Ordenar filas de arriba hacia abajo (Y descendente en coords PDF = arriba)
+      const sortedY=Object.keys(rows).map(Number).sort((a,b)=>b-a);
+      sortedY.forEach(y=>{
+        const row=rows[y].sort((a,b)=>a.x-b.x);
+        const lineText=row.map(r=>r.str).join(' ').replace(/\s+/g,' ').trim();
+        if(lineText) allLines.push(lineText);
+      });
     }
-    if(!text.trim()) throw new Error('El PDF no tiene texto extraíble. Toma una foto de la boleta en cambio.');
+
+    if(!allLines.length) throw new Error('El PDF no tiene texto extraíble. Toma una foto de la boleta en cambio.');
     setStatus('🧠 Analizando boleta...','var(--muted)');
-    const result = parseBoleta(text);
+    const result = parseBoleta(allLines.join('\n'));
     showBoletaResult(result);
   } catch(err){
     showFileError(err.message||'Error al procesar el PDF.');
@@ -1184,12 +1349,10 @@ async function processPDF(file){
   }
 }
 
-/* ─── PARSER LOCAL DE BOLETAS CHILENAS ─── */
-/* Funciona con Jumbo, Lider, Tottus, Unimarc, Santa Isabel sin necesitar API */
+/* ─── PARSER LOCAL DE BOLETAS CHILENAS (Jumbo/Cencosud, Lider, Tottus, Unimarc) ─── */
 function parseBoleta(text){
-  const lines = text.split('\n').map(l=>l.trim()).filter(Boolean);
+  const rawLines = text.split('\n').map(l=>l.trim()).filter(Boolean);
 
-  // Detectar tienda
   let store='Supermercado';
   const tl=text.toUpperCase();
   if(tl.includes('JUMBO')) store='Jumbo';
@@ -1198,108 +1361,101 @@ function parseBoleta(text){
   else if(tl.includes('UNIMARC')) store='Unimarc';
   else if(tl.includes('SANTA ISABEL')) store='Santa Isabel';
 
-  // Detectar fecha
   let date='';
   const dateM=text.match(/(\d{2}\/\d{2}\/\d{2,4})/);
   if(dateM) date=dateM[1];
 
-  const items=[];
+  // Algunas líneas de PDF.js pueden venir fragmentadas igual (código y nombre separados
+  // de su precio en líneas distintas). Para máxima robustez, además de intentar parsear
+  // línea por línea, también re-unimos TODO el texto en un solo string y aplicamos
+  // un escaneo global con regex multilinea — así no importa cómo PDF.js dividió las líneas.
+  const joined = rawLines.join(' \n ');
 
-  // ── Patrón 1: Boletas Jumbo/Cencosud ──
-  // Formato: "7790895001239 AGUA ENERGY 500CC 5.000"
-  // con líneas opcionales de descuento/oferta debajo
-  const jumboRE=/^\d{7,13}\s+(.+?)\s+([\d.]+)\s*$/;
-  // Patrón cantidad: "4 X $1.250" o "2 X $3.190"
-  const qtyRE=/^(\d+)\s+[Xx]\s+\$?([\d.]+)$/;
-  // Patrón peso: "0,322 KG X $12.360"
-  const pesoRE=/^([\d,]+)\s+KG\s+[Xx]\s+\$?([\d.]+)$/;
-  // Descuento/oferta (ignorar)
-  const discRE=/^(TMP|OFERTA|DESCUENTO|CAF|LPM|PRI|L-|OFERTA\s)/i;
+  const items=[];
+  const seen=new Set();
+
+  function pushItem(name,qty,unit,price){
+    name=cleanProductName(name);
+    if(!name||price<=0) return;
+    const key=name.toLowerCase()+'|'+price;
+    if(seen.has(key)) return;
+    seen.add(key);
+    items.push({name,qty,unit,price:Math.round(price)});
+  }
+
+  // ── PASE 1: línea por línea (boletas con todo en una sola línea por producto) ──
+  const jumboLineRE=/^(\d{7,13})\s+(.+?)\s+([\d]{1,3}(?:\.\d{3})*)\s*$/;
+  const qtyLineRE=/^(\d+)\s*[Xx]\s*\$?\s*([\d.]+)\s*$/;
+  const pesoLineRE=/^([\d,]+)\s*KG\s*[Xx]\s*\$?\s*([\d.]+)\s*$/i;
+  const discLineRE=/^(TMP|OFERTA|DESCUENTO|CAF[-\s]|LPM[-\s]|PRI[-:\s]|L-\d)/i;
+  const skipRE=/sub.?total|^total|descuento|iva|neto|vuelto|cr[eé]dito|fecha|boleta|rut\b|sii\b|puntos|nombre:|saldo|cencosud|atendido|timbre|verifique|local|numero op|caja|terminos/i;
 
   let pendingQty=null;
+  for(const line of rawLines){
+    if(skipRE.test(line)) { pendingQty=null; continue; }
 
-  for(let i=0;i<lines.length;i++){
-    const line=lines[i];
-
-    // Detectar línea de cantidad previa "N X $precio"
-    const qm=line.match(qtyRE);
+    const qm=line.match(qtyLineRE);
     if(qm){ pendingQty={qty:parseInt(qm[1]),priceEach:parseChileanNum(qm[2])}; continue; }
 
-    // Detectar línea de peso "X,XXX KG X $precio"
-    const pm=line.match(pesoRE);
+    const pm=line.match(pesoLineRE);
     if(pm){ pendingQty={qty:parseFloat(pm[1].replace(',','.')),priceEach:parseChileanNum(pm[2]),unit:'kg'}; continue; }
 
-    // Ignorar líneas de descuento/oferta
-    if(discRE.test(line)){ continue; }
+    if(discLineRE.test(line)){ continue; }
 
-    // Línea de producto con código de barras
-    const jm=line.match(jumboRE);
+    const jm=line.match(jumboLineRE);
     if(jm){
-      const rawName=jm[1].trim();
-      const totalPrice=parseChileanNum(jm[2]);
-      if(!rawName||totalPrice<=0){ pendingQty=null; continue; }
-
+      const totalPrice=parseChileanNum(jm[3]);
       let qty=1, unit='un', price=totalPrice;
-      if(pendingQty){
-        qty=pendingQty.qty;
-        unit=pendingQty.unit||'un';
-        price=pendingQty.priceEach||Math.round(totalPrice/qty);
-        pendingQty=null;
-      }
-
-      // Limpiar nombre: capitalizar correctamente
-      const name=cleanProductName(rawName);
-      if(name) items.push({name,qty,unit,price:Math.round(price)});
+      if(pendingQty){ qty=pendingQty.qty; unit=pendingQty.unit||'un'; price=pendingQty.priceEach||Math.round(totalPrice/qty); pendingQty=null; }
+      pushItem(jm[2], qty, unit, price);
       continue;
     }
 
-    // Reset pendingQty si la línea no es relevante
-    if(line.length>2 && !line.match(/^[-\s*]+$/)) pendingQty=null;
+    if(line.length>2 && !/^[-\s*=_.]+$/.test(line)) pendingQty=null;
   }
 
-  // ── Patrón 2: Si no encontró nada con Jumbo, probar formato genérico ──
+  // ── PASE 2: escaneo global con regex multilínea por si PDF.js separó
+  //    código / nombre / precio en líneas distintas ──
+  if(items.length<3){
+    // Captura: código de barras (7-13 dígitos) ... texto ... número con formato chileno de miles (X.XXX)
+    const globalRE=/(\d{7,13})\s*\n?\s*([A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ0-9.,\/\s]{2,40}?)\s*\n?\s*(\d{1,3}(?:\.\d{3})+)(?!\d)/g;
+    let gm;
+    while((gm=globalRE.exec(joined))!==null){
+      const name=gm[2];
+      const price=parseChileanNum(gm[3]);
+      if(skipRE.test(name)) continue;
+      pushItem(name, 1, 'un', price);
+    }
+  }
+
+  // ── PASE 3: fallback genérico "Nombre ... $precio" para boletas no-Cencosud ──
   if(items.length===0){
-    // Buscar líneas con precio al final: "Nombre producto     $1.990" o "Nombre producto    1.990"
     const genRE=/^(.{3,40}?)\s{2,}\$?\s*([\d]{1,3}(?:[.,]\d{3})+|\d+)\s*$/;
-    for(const line of lines){
-      if(/sub.?total|total|descuento|iva|neto|vuelto|credito|fecha|boleta|rut|sii|puntos|nombre|saldo/i.test(line)) continue;
+    for(const line of rawLines){
+      if(skipRE.test(line)) continue;
       const gm=line.match(genRE);
-      if(gm){
-        const name=cleanProductName(gm[1]);
-        const price=parseChileanNum(gm[2]);
-        if(name&&price>0) items.push({name,qty:1,unit:'un',price});
-      }
+      if(gm){ pushItem(gm[1], 1, 'un', parseChileanNum(gm[2])); }
     }
   }
 
   if(items.length===0){
     return {error:'No se encontraron productos en la boleta. El PDF podría ser una imagen escaneada — toma una foto con la cámara.'};
   }
-
   return {store,date,items};
 }
 
 function parseChileanNum(str){
-  // "5.000" → 5000 | "6.380" → 6380 | "3.980" → 3980
   if(!str) return 0;
-  const s=str.replace(/\s/g,'');
-  // Si tiene coma decimal: "1,250" → 1.25 (poco probable en precios)
-  if(s.includes(',')&&!s.includes('.')){
-    return Math.round(parseFloat(s.replace(',','.'))*1000)/1000;
-  }
-  // Punto como separador de miles: "5.000" → 5000
+  const s=String(str).replace(/\s/g,'');
+  if(s.includes(',')&&!s.includes('.')) return Math.round(parseFloat(s.replace(',','.'))*1000)/1000;
   return parseInt(s.replace(/\./g,''),10)||0;
 }
 
 function cleanProductName(raw){
   if(!raw) return '';
-  // Eliminar códigos internos y caracteres especiales
   let n=raw.replace(/\b\d{7,}\b/g,'').trim();
-  // Capitalizar: "AGUA ENERGY 500CC" → "Agua Energy 500cc"
   n=n.toLowerCase().replace(/\b(\w)/g,c=>c.toUpperCase());
-  // Limpiar espacios múltiples
   n=n.replace(/\s+/g,' ').trim();
-  // Mínimo 3 caracteres
   return n.length>=3?n:'';
 }
 
@@ -1375,12 +1531,10 @@ function showBoletaResult(parsed){
 function addAllToInv(){
   if(!pendingBoleta.length) return;
   pendingBoleta.forEach(it=>{
-    // Buscar en catálogo por nombre similar
     const key=it.name.toLowerCase().split(' ')[0];
     const catMatch=CATALOG.find(c=>c.name.toLowerCase().includes(key));
-    addInvItem(it.name, catMatch?.brand||'', catMatch?.cat||'Abarrotes', it.qty||1, it.unit||'un', catMatch?.emoji||'📦', catMatch?.img||'default', catMatch?.id||null);
+    addInvItem(it.name, catMatch?.brand||'', catMatch?.cat||'Abarrotes', it.qty||1, it.unit||'un', catMatch?.emoji||smartEmoji(it.name), catMatch?.img||null, catMatch?.id||null, null);
   });
-  // Guardar boleta en historial
   const store=document.getElementById('scanStatus').textContent.match(/de (.+) —/)?.[1]||'supermercado';
   boletas.push({id:Date.now(),store,date:today(),items:pendingBoleta.length,addedBy:currentUser});
   LS.set('boletas',boletas);
@@ -1479,18 +1633,17 @@ function renderList(){
   if(!list.length){ g.innerHTML='<div class="empty" style="grid-column:1/-1"><div class="eicon">🛒</div><div class="etxt">'+(!products.length?'Lista vacía — agrega tu primer producto':'Sin productos en esta vista')+'</div></div>'; return; }
 
   function invM(name){ const k=name.toLowerCase().split(' ')[0]; return inventario.find(i=>i.name.toLowerCase().includes(k)&&i.qty>0); }
-  const catRef={}; CATALOG.forEach(c=>{ catRef[c.name]=c; });
   function catLookup(name){ const k=name.toLowerCase().split(' ')[0]; return CATALOG.find(c=>c.name.toLowerCase().includes(k)); }
 
   g.innerHTML=list.map(p=>{
     const ic=invM(p.name);
     const cat=catLookup(p.name);
-    const imgKey=cat?.img||'default';
-    const emoji=cat?.emoji||'📦';
+    const imgSrc=cat?gimg(cat.img):smartImg(p.name);
+    const emoji=cat?.emoji||smartEmoji(p.name);
     const chip=p.addedBy==='Felipe'?'chipF':p.addedBy==='Melisa'?'chipM':'chip2';
     return `<div class="pcard${p.bought?' done':''}">
       <div class="pimgw">
-        <img class="pimg" src="${gimg(imgKey)}" alt="${p.name}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
+        <img class="pimg" src="${imgSrc}" alt="${p.name}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
         <div class="pimgfb" style="display:none">${emoji}</div>
         <div class="pchk${p.bought?' ck':''}" onclick="toggleBought(${p.id})"></div>
         <div class="pdel" onclick="removeProduct(${p.id})">🗑️</div>
