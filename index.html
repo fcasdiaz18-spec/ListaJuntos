@@ -10,35 +10,12 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,wght@0,300;0,600;0,700;1,300&family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 
-<!-- ══ FIREBASE CONFIG ══
-     Reemplaza con los valores de tu proyecto Firebase.
-     1. Ve a https://console.firebase.google.com
-     2. Crea un proyecto → Agrega app web
-     3. Copia el firebaseConfig y pégalo aquí
-     4. En Authentication: habilita "Email/Password"
-     5. En Firestore: crea base de datos en modo producción
-     6. En Reglas Firestore, pega las reglas incluidas al final del script
+<!-- ══ SISTEMA DE USUARIOS LOCAL ══
+     Dos usuarios fijos del hogar: Felipe (administrador) y Melisa.
+     Las contraseñas se guardan como hash SHA-256 con salt, nunca en texto plano.
+     El admin puede cambiar contraseñas desde el Panel de administración.
 -->
-<script type="module">
-import { initializeApp }          from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-import { getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword,
-         onAuthStateChanged, signOut, updateProfile }
-                                  from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
-import { getFirestore, doc, collection, setDoc, getDoc, updateDoc,
-         onSnapshot, addDoc, deleteDoc, query, where, orderBy, serverTimestamp }
-                                  from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
-
-// ════════════════════════════════════════════════
-//  ⚙️  CONFIGURACIÓN FIREBASE — edita aquí
-// ════════════════════════════════════════════════
-const FIREBASE_CONFIG = {
-  apiKey:            "REEMPLAZA_CON_TU_API_KEY",
-  authDomain:        "REEMPLAZA.firebaseapp.com",
-  projectId:         "REEMPLAZA",
-  storageBucket:     "REEMPLAZA.appspot.com",
-  messagingSenderId: "REEMPLAZA",
-  appId:             "REEMPLAZA"
-};
+<script>
 
 // ════════════════════════════════════════════════
 //  ⚙️  CLAVE DE API DE ANTHROPIC (para IA)
@@ -56,21 +33,39 @@ const ANTHROPIC_KEY = ""; // tu sk-ant-...
 const HOUSEHOLD_ID = "felipe-melisa-hogar"; // puedes cambiarlo
 
 // ══════════════════════════════════════════════════
-//  INIT FIREBASE
+//  USUARIOS DEL HOGAR (local, sin servidor)
 // ══════════════════════════════════════════════════
-let app, auth, db;
-let currentUser = null;
-let unsubListeners = []; // para limpiar onSnapshot al cambiar usuario
+const PWD_SALT = "lj6|";
+const USERS = {
+  felipe: {
+    uid: "felipe", name: "Felipe", role: "admin",
+    avatar: "F", color: "linear-gradient(135deg,#6B4EFF,#4E9FFF)",
+    // hash SHA-256 de la contraseña inicial (Felipe123)
+    defaultHash: "fcfabceae50b41b7862c42e6a7c9ee8e1b4c63bfa44a496caad8646b187057a9"
+  },
+  melisa: {
+    uid: "melisa", name: "Melisa", role: "user",
+    avatar: "M", color: "linear-gradient(135deg,#FF6B9A,#FF6B6B)",
+    // hash SHA-256 de la contraseña inicial (Meli123)
+    defaultHash: "5a9e0a1d6ab22fb534a970c64bd48ab4444cde6d83ba08602e9766f307ff4ff7"
+  }
+};
 
-try {
-  app  = initializeApp(FIREBASE_CONFIG);
-  auth = getAuth(app);
-  db   = getFirestore(app);
-  console.log("✅ Firebase conectado");
-} catch(e) {
-  console.warn("⚠️ Firebase no configurado, modo local activado:", e.message);
-  // Modo local: sin sync entre dispositivos, todo en localStorage
+let db = null;          // sin Firebase — todo se guarda en localStorage
+let currentUser = null;
+let unsubListeners = [];
+
+// SHA-256 con Web Crypto (GitHub Pages es HTTPS, siempre disponible)
+async function sha256(txt) {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(txt));
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
 }
+
+// Hash vigente: el que cambió el admin (guardado en LS) o el inicial
+function getUserHash(uid_) {
+  return localStorage.getItem("lj6_pwd_" + uid_) || USERS[uid_].defaultHash;
+}
+function isAdmin() { return currentUser?.role === "admin"; }
 
 // ══════════════════════════════════════════════════
 //  HELPERS
@@ -111,144 +106,160 @@ let STATE = {
 };
 
 // ══════════════════════════════════════════════════
-//  AUTH — LOGIN / REGISTRO
+//  AUTH LOCAL — LOGIN CON USUARIOS FIJOS
 // ══════════════════════════════════════════════════
-onAuthStateChanged(auth, async (user) => {
-  if (user) {
-    currentUser = user;
-    LS.set("lastEmail", user.email);
-    await initUserProfile(user);
-    showApp();
-  } else {
-    currentUser = null;
-    showAuth();
-  }
-});
+let selectedUid = null;
 
-async function loginWithEmail() {
-  const email    = $("loginEmail").value.trim();
+function selectUser(uid_) {
+  selectedUid = uid_;
+  document.querySelectorAll(".user-card").forEach(c => c.classList.remove("sel"));
+  $("ucard-" + uid_).classList.add("sel");
+  $("loginPassword").value = "";
+  $("loginPwdWrap").style.display = "flex";
+  $("loginPassword").focus();
+}
+
+async function doLogin() {
+  if (!selectedUid) { toast("Elige tu usuario", "error"); return; }
   const password = $("loginPassword").value;
-  if (!email || !password) { toast("Completa email y contraseña", "error"); return; }
+  if (!password) { toast("Ingresa tu contraseña", "error"); return; }
   setLoading(true, "Iniciando sesión...");
-  try {
-    await signInWithEmailAndPassword(auth, email, password);
-  } catch(e) {
+  const hash = await sha256(PWD_SALT + password);
+  if (hash !== getUserHash(selectedUid)) {
     setLoading(false);
-    const msgs = {
-      "auth/invalid-credential": "Email o contraseña incorrectos",
-      "auth/user-not-found":     "Usuario no encontrado",
-      "auth/wrong-password":     "Contraseña incorrecta",
-      "auth/too-many-requests":  "Demasiados intentos. Espera un momento.",
-    };
-    toast(msgs[e.code] || e.message, "error");
+    toast("Contraseña incorrecta", "error");
+    return;
   }
+  LS.set("session", { uid: selectedUid, ts: Date.now() });
+  await startSession(selectedUid);
 }
 
-async function registerUser() {
-  const name     = $("regName").value.trim();
-  const email    = $("regEmail").value.trim();
-  const password = $("regPassword").value;
-  if (!name || !email || !password) { toast("Completa todos los campos", "error"); return; }
-  if (password.length < 6) { toast("La contraseña debe tener al menos 6 caracteres", "error"); return; }
-  setLoading(true, "Creando cuenta...");
-  try {
-    const cred = await createUserWithEmailAndPassword(auth, email, password);
-    await updateProfile(cred.user, { displayName: name });
-    // Crear perfil en Firestore
-    await setDoc(doc(db, "users", cred.user.uid), {
-      name, email, createdAt: serverTimestamp(),
-      householdId: HOUSEHOLD_ID,
-      avatar: name[0].toUpperCase(),
-    });
-  } catch(e) {
-    setLoading(false);
-    const msgs = {
-      "auth/email-already-in-use": "Este email ya está registrado",
-      "auth/invalid-email": "Email inválido",
-      "auth/weak-password": "Contraseña muy débil",
-    };
-    toast(msgs[e.code] || e.message, "error");
-  }
-}
-
-async function doLogout() {
-  if (!confirm("¿Cerrar sesión?")) return;
-  unsubListeners.forEach(fn => fn());
-  unsubListeners = [];
-  await signOut(auth);
-}
-
-// ══════════════════════════════════════════════════
-//  PERFIL DE USUARIO + SYNC FIRESTORE
-// ══════════════════════════════════════════════════
-async function initUserProfile(user) {
-  setLoading(true, "Sincronizando datos...");
-  try {
-    // Leer perfil propio
-    const profSnap = await getDoc(doc(db, "users", user.uid));
-    if (!profSnap.exists()) {
-      // Primer login — crear perfil básico
-      await setDoc(doc(db, "users", user.uid), {
-        name: user.displayName || user.email.split("@")[0],
-        email: user.email, householdId: HOUSEHOLD_ID,
-        avatar: (user.displayName||user.email)[0].toUpperCase(),
-        createdAt: serverTimestamp(),
-      });
-    }
-
-    // Suscribir inventario (compartido)
-    const invQ = query(collection(db, "households", HOUSEHOLD_ID, "inventario"), orderBy("name"));
-    const u1 = onSnapshot(invQ, snap => {
-      STATE.inventario = snap.docs.map(d => ({id: d.id, ...d.data()}));
-      if (activePage === "inventario") renderInventario();
-      if (activePage === "dashboard") renderDashboard();
-      checkReminders();
-    });
-    unsubListeners.push(u1);
-
-    // Suscribir deudas (compartido)
-    const debtQ = query(collection(db, "households", HOUSEHOLD_ID, "debts"), orderBy("createdAt","desc"));
-    const u2 = onSnapshot(debtQ, snap => {
-      STATE.debts = snap.docs.map(d => ({id: d.id, ...d.data()}));
-      if (activePage === "deudas") renderDeudas();
-      if (activePage === "dashboard") renderDashboard();
-    });
-    unsubListeners.push(u2);
-
-    // Suscribir gastos personales (privado por usuario)
-    const expQ = query(collection(db, "users", user.uid, "expenses"), orderBy("date","desc"));
-    const u3 = onSnapshot(expQ, snap => {
-      STATE.expenses[user.uid] = snap.docs.map(d => ({id: d.id, ...d.data()}));
-      if (activePage === "finanzas") renderFinanzas();
-      if (activePage === "dashboard") renderDashboard();
-    });
-    unsubListeners.push(u3);
-
-  } catch(e) {
-    console.warn("Firestore no disponible, modo local:", e.message);
-    // Fallback a localStorage
-    STATE.inventario = LS.get("inv") || [];
-    STATE.debts      = LS.get("debts") || [];
-    STATE.expenses[user.uid] = LS.get("exp_"+(user.displayName||"user")) || [];
-  }
+async function startSession(uid_) {
+  const u = USERS[uid_];
+  currentUser = {
+    uid: u.uid,
+    displayName: u.name,
+    email: u.uid + "@listajuntos.local",
+    role: u.role,
+    avatar: u.avatar,
+    color: u.color,
+  };
+  loadLocalData();
   setLoading(false);
+  showApp();
 }
 
-// Helper: guardar en Firestore y fallback LS
-async function fsSet(path, data) {
-  try {
-    if(db) await setDoc(doc(db, ...path.split("/")), { ...data, updatedAt: serverTimestamp() }, { merge: true });
-  } catch(e) { console.warn("fs set error:", e.message); }
+function doLogout() {
+  if (!confirm("¿Cerrar sesión?")) return;
+  LS.set("session", null);
+  currentUser = null;
+  selectedUid = null;
+  closeSheet("perfil");
+  $("loginPwdWrap").style.display = "none";
+  document.querySelectorAll(".user-card").forEach(c => c.classList.remove("sel"));
+  showAuth();
 }
-async function fsAdd(col, data) {
-  try {
-    if(db) { const ref = await addDoc(collection(db, ...col.split("/")), { ...data, createdAt: serverTimestamp() }); return ref.id; }
-  } catch(e) { console.warn("fs add error:", e.message); }
-  return uid();
+
+// Restaurar sesión guardada al abrir la app
+async function checkSession() {
+  const s = LS.get("session");
+  if (s && s.uid && USERS[s.uid]) { await startSession(s.uid); }
+  else showAuth();
 }
-async function fsDel(path) {
-  try { if(db) await deleteDoc(doc(db, ...path.split("/"))); }
-  catch(e) { console.warn("fs del error:", e.message); }
+
+// ══════════════════════════════════════════════════
+//  DATOS LOCALES (localStorage por colección)
+// ══════════════════════════════════════════════════
+function loadLocalData() {
+  STATE.inventario = LS.get("inv")   || [];
+  STATE.debts      = LS.get("debts") || [];
+  STATE.boletas    = LS.get("boletas") || [];
+  // Gastos personales por usuario (migra clave antigua exp_<Nombre> si existe)
+  const u = USERS[currentUser.uid];
+  STATE.expenses[currentUser.uid] =
+    LS.get("exp_" + u.name) || LS.get("exp_" + currentUser.uid) || [];
+}
+
+// Helpers de persistencia (misma firma que la versión Firebase,
+// para no tocar el resto del código — aquí solo persisten en LS)
+async function fsSet(path, data) { /* persistencia la hace cada función vía LS.set */ }
+async function fsAdd(col, data)  { return uid(); }
+async function fsDel(path)       { /* idem */ }
+
+// ══════════════════════════════════════════════════
+//  CAMBIO DE CONTRASEÑA + PANEL DE ADMINISTRACIÓN
+// ══════════════════════════════════════════════════
+async function changeOwnPassword() {
+  const cur = prompt("Contraseña actual:");
+  if (cur === null) return;
+  const curHash = await sha256(PWD_SALT + cur);
+  if (curHash !== getUserHash(currentUser.uid)) { toast("Contraseña actual incorrecta", "error"); return; }
+  const nw = prompt("Nueva contraseña (mínimo 6 caracteres):");
+  if (nw === null) return;
+  if (nw.length < 6) { toast("Debe tener al menos 6 caracteres", "error"); return; }
+  localStorage.setItem("lj6_pwd_" + currentUser.uid, await sha256(PWD_SALT + nw));
+  toast("🔑 Contraseña actualizada");
+}
+
+async function adminResetPassword(uid_) {
+  if (!isAdmin()) { toast("Solo el administrador puede hacer esto", "error"); return; }
+  const nw = prompt(`Nueva contraseña para ${USERS[uid_].name} (mínimo 6 caracteres):`);
+  if (nw === null) return;
+  if (nw.length < 6) { toast("Debe tener al menos 6 caracteres", "error"); return; }
+  localStorage.setItem("lj6_pwd_" + uid_, await sha256(PWD_SALT + nw));
+  toast(`🔑 Contraseña de ${USERS[uid_].name} actualizada`);
+}
+
+function adminSettleDebts() {
+  if (!isAdmin()) return;
+  if (!confirm("¿Marcar TODAS las deudas como saldadas? El balance quedará en $0.")) return;
+  STATE.debts.forEach(d => d.paid = true);
+  LS.set("debts", STATE.debts);
+  renderDeudas(); renderDashboard();
+  toast("✅ Todas las deudas saldadas — balance en cero");
+}
+
+function adminClearDebts() {
+  if (!isAdmin()) return;
+  if (!confirm("¿Borrar TODO el historial de gastos del hogar? Esta acción no se puede deshacer.")) return;
+  STATE.debts = [];
+  LS.set("debts", STATE.debts);
+  renderDeudas(); renderDashboard();
+  toast("🗑️ Historial de gastos del hogar borrado");
+}
+
+function adminClearInventory() {
+  if (!isAdmin()) return;
+  if (!confirm("¿Borrar TODO el inventario? Esta acción no se puede deshacer.")) return;
+  STATE.inventario = [];
+  LS.set("inv", STATE.inventario);
+  renderInventario(); renderDashboard();
+  toast("🗑️ Inventario borrado");
+}
+
+function adminClearExpenses(uid_) {
+  if (!isAdmin()) return;
+  if (!confirm(`¿Borrar todos los gastos personales de ${USERS[uid_].name}? No se puede deshacer.`)) return;
+  STATE.expenses[uid_] = [];
+  LS.set("exp_" + USERS[uid_].name, []);
+  LS.set("exp_" + uid_, []);
+  if (uid_ === currentUser.uid) { renderFinanzas(); renderDashboard(); }
+  toast(`🗑️ Gastos personales de ${USERS[uid_].name} borrados`);
+}
+
+// ══════════════════════════════════════════════════
+//  PERFIL (sheet con info de usuario + admin)
+// ══════════════════════════════════════════════════
+function openProfile() {
+  if (!currentUser) return;
+  $("profAvatar").textContent = currentUser.avatar;
+  $("profAvatar").style.background = currentUser.color;
+  $("profName").textContent = currentUser.displayName;
+  $("profRole").innerHTML = isAdmin()
+    ? '<span class="role-badge admin">👑 Administrador</span>'
+    : '<span class="role-badge">Usuario</span>';
+  $("adminPanel").style.display = isAdmin() ? "block" : "none";
+  openSheet("perfil");
 }
 
 // ══════════════════════════════════════════════════
@@ -296,10 +307,8 @@ function navTo(id) {
 function initAppUI() {
   if (!currentUser) return;
   const name = currentUser.displayName || currentUser.email.split("@")[0];
-  $("topAvatar").textContent = name[0].toUpperCase();
-  $("topAvatar").style.background = name.toLowerCase().startsWith("f")
-    ? "linear-gradient(135deg,#6B4EFF,#4E9FFF)"
-    : "linear-gradient(135deg,#FF6B9A,#FF6B6B)";
+  $("topAvatar").textContent = currentUser.avatar || name[0].toUpperCase();
+  $("topAvatar").style.background = currentUser.color || "linear-gradient(135deg,#6B4EFF,#4E9FFF)";
 
   // Greeting
   const h = new Date().getHours();
@@ -1372,43 +1381,27 @@ function openSheet(id){ $("sheet-"+id).classList.add("open"); }
 function closeSheet(id){ $("sheet-"+id).classList.remove("open"); }
 function closeSheetIfBack(e,id){ if(e.target===$("sheet-"+id)) closeSheet(id); }
 
-// Listener para live debt preview
+// Init: restaurar sesión + listeners de preview de deudas
 window.addEventListener("DOMContentLoaded",()=>{
   ["dAmount","dPayer","dOwed"].forEach(id=>{
     const el=$(id); if(el){ el.addEventListener("input",updateDebtPreview); el.addEventListener("change",updateDebtPreview); }
   });
   $("expDate")?.setAttribute("value",today());
+  checkSession();
 });
-
-// Auth tabs
-function showAuthTab(tab){
-  $("loginTab").style.display=tab==="login"?"block":"none";
-  $("registerTab").style.display=tab==="register"?"block":"none";
-  document.querySelectorAll(".auth-tab").forEach(t=>t.classList.remove("on"));
-  $("authtab-"+tab).classList.add("on");
-}
 
 /*
   ═══════════════════════════════════════════════════
-  REGLAS FIRESTORE (pega esto en Firebase Console)
+  NOTAS — SISTEMA DE USUARIOS LOCAL
   ═══════════════════════════════════════════════════
-  rules_version = '2';
-  service cloud.firestore {
-    match /databases/{database}/documents {
-      // Usuarios: solo el propio usuario lee/escribe su perfil
-      match /users/{userId} {
-        allow read, write: if request.auth != null && request.auth.uid == userId;
-        // Gastos privados: solo el dueño
-        match /expenses/{expId} {
-          allow read, write: if request.auth != null && request.auth.uid == userId;
-        }
-      }
-      // Hogar compartido: cualquier usuario autenticado puede leer/escribir
-      match /households/{householdId}/{document=**} {
-        allow read, write: if request.auth != null;
-      }
-    }
-  }
+  · Usuarios fijos: Felipe (admin) y Melisa.
+  · Contraseñas: hash SHA-256 con salt; los cambios de contraseña
+    se guardan en localStorage (lj6_pwd_<uid>) de cada dispositivo.
+  · Los datos viven en localStorage del navegador/dispositivo.
+    En un mismo teléfono, ambos usuarios comparten inventario y
+    gastos del hogar; los gastos personales son por usuario.
+  · Al ser una app 100% del lado del cliente, esta protección es
+    de conveniencia doméstica, no seguridad bancaria.
 */
 </script>
 <!-- PDF.js -->
@@ -1471,6 +1464,19 @@ img{display:block;max-width:100%}
 .auth-btn:hover{background:var(--accent2)}
 .auth-btn:active{transform:scale(.97)}
 .auth-note{font-size:11px;color:var(--text3);text-align:center;margin-top:4px}
+.auth-question{font-size:14px;font-weight:600;color:var(--text2);margin-bottom:16px}
+.user-cards{display:flex;gap:14px;margin-bottom:24px;width:100%;max-width:360px}
+.user-card{flex:1;background:var(--sur);border:1.5px solid var(--border2);border-radius:var(--r);padding:20px 12px;display:flex;flex-direction:column;align-items:center;gap:8px;cursor:pointer;transition:all .18s;-webkit-tap-highlight-color:transparent;user-select:none}
+.user-card:active{transform:scale(.96)}
+.user-card.sel{border-color:var(--accent);background:var(--sur2);box-shadow:0 0 0 3px rgba(107,78,255,.18)}
+.user-card-avatar{width:56px;height:56px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:24px;font-weight:800;color:#fff;font-family:"Fraunces",serif}
+.user-card-name{font-size:15px;font-weight:700}
+.user-card-role{font-size:10px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.5px}
+.prof-avatar{width:52px;height:52px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:22px;font-weight:800;color:#fff;font-family:"Fraunces",serif;flex-shrink:0}
+.role-badge{display:inline-block;font-size:10px;font-weight:700;padding:3px 9px;border-radius:20px;background:var(--sur2);border:1px solid var(--border2);color:var(--text2);text-transform:uppercase;letter-spacing:.5px}
+.role-badge.admin{background:rgba(255,185,70,.14);border-color:rgba(255,185,70,.4);color:var(--yellow,#FFB946)}
+.admin-title{font-size:11px;font-weight:800;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin:18px 0 10px;padding-top:14px;border-top:1px solid var(--border)}
+.admin-grid{display:flex;flex-direction:column;gap:8px}
 
 /* ── LOADING ── */
 #loadingOverlay{position:fixed;inset:0;z-index:900;background:rgba(8,11,20,.8);backdrop-filter:blur(8px);display:none;flex-direction:column;align-items:center;justify-content:center;gap:12px}
@@ -1759,26 +1765,26 @@ img{display:block;max-width:100%}
 <div id="authScreen">
   <div class="auth-logo">Lista<span>Juntos</span></div>
   <div class="auth-tagline">Tu hogar organizado · en pareja</div>
-  <div class="auth-tabs">
-    <button class="auth-tab on" id="authtab-login" onclick="showAuthTab('login')">Iniciar sesión</button>
-    <button class="auth-tab" id="authtab-register" onclick="showAuthTab('register')">Registrarse</button>
+
+  <div class="auth-question">¿Quién eres?</div>
+  <div class="user-cards">
+    <div class="user-card" id="ucard-felipe" onclick="selectUser('felipe')">
+      <div class="user-card-avatar" style="background:linear-gradient(135deg,#6B4EFF,#4E9FFF)">F</div>
+      <div class="user-card-name">Felipe</div>
+      <div class="user-card-role">👑 Admin</div>
+    </div>
+    <div class="user-card" id="ucard-melisa" onclick="selectUser('melisa')">
+      <div class="user-card-avatar" style="background:linear-gradient(135deg,#FF6B9A,#FF6B6B)">M</div>
+      <div class="user-card-name">Melisa</div>
+      <div class="user-card-role">Usuario</div>
+    </div>
   </div>
 
-  <!-- Login -->
-  <div id="loginTab" class="auth-form">
-    <input class="auth-input" id="loginEmail" type="email" placeholder="correo@ejemplo.com" autocomplete="email">
-    <input class="auth-input" id="loginPassword" type="password" placeholder="Contraseña" autocomplete="current-password">
-    <button class="auth-btn" onclick="loginWithEmail()">Entrar →</button>
-    <div class="auth-note">Demo: usa cualquier email/contraseña que hayas registrado</div>
-  </div>
-
-  <!-- Register -->
-  <div id="registerTab" class="auth-form" style="display:none">
-    <input class="auth-input" id="regName" type="text" placeholder="Tu nombre (ej: Felipe)" autocomplete="name">
-    <input class="auth-input" id="regEmail" type="email" placeholder="correo@ejemplo.com" autocomplete="email">
-    <input class="auth-input" id="regPassword" type="password" placeholder="Contraseña (mín. 6 caracteres)" autocomplete="new-password">
-    <button class="auth-btn" onclick="registerUser()">Crear cuenta →</button>
-    <div class="auth-note">Los datos financieros personales son privados y solo tú los verás</div>
+  <div class="auth-form" id="loginPwdWrap" style="display:none">
+    <input class="auth-input" id="loginPassword" type="password" placeholder="Contraseña"
+           autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin()">
+    <button class="auth-btn" onclick="doLogin()">Entrar →</button>
+    <div class="auth-note">Tus gastos personales son privados — solo tú los ves en tu sesión</div>
   </div>
 </div>
 
@@ -1792,7 +1798,7 @@ img{display:block;max-width:100%}
     <div class="ctx-pill" id="ctxPill">⊞ Inicio</div>
     <div class="top-bar-right">
       <button class="theme-pill" onclick="toggleTheme()"><span id="themeIcon">☀️</span></button>
-      <div class="avatar-btn" id="topAvatar" onclick="doLogout()">?</div>
+      <div class="avatar-btn" id="topAvatar" onclick="openProfile()">?</div>
     </div>
   </div>
 
@@ -2092,6 +2098,37 @@ img{display:block;max-width:100%}
       <div id="debtPreview" style="background:var(--bg2);border-radius:var(--r-s);padding:10px;font-size:12px;color:var(--text2);display:none"></div>
       <button class="btn btn-accent btn-full" onclick="addDebt()">Registrar gasto</button>
     </div>
+  </div>
+</div>
+
+<!-- Perfil + Panel de administración -->
+<div class="overlay" id="sheet-perfil" onclick="closeSheetIfBack(event,'perfil')">
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <div style="display:flex;align-items:center;gap:14px;margin-bottom:18px">
+      <div class="prof-avatar" id="profAvatar">?</div>
+      <div>
+        <div style="font-family:'Fraunces',serif;font-size:20px;font-weight:700" id="profName">—</div>
+        <div id="profRole" style="margin-top:4px"></div>
+      </div>
+    </div>
+
+    <button class="btn btn-ghost btn-full" style="margin-bottom:8px" onclick="changeOwnPassword()">🔑 Cambiar mi contraseña</button>
+
+    <div id="adminPanel" style="display:none">
+      <div class="admin-title">Panel de administración</div>
+      <div class="admin-grid">
+        <button class="btn btn-ghost btn-full" onclick="adminResetPassword('melisa')">🔑 Resetear contraseña de Melisa</button>
+        <button class="btn btn-green btn-full" onclick="adminSettleDebts()">✅ Saldar todas las deudas (balance a $0)</button>
+        <button class="btn btn-red btn-full" onclick="adminClearDebts()">🗑️ Borrar historial de gastos del hogar</button>
+        <button class="btn btn-red btn-full" onclick="adminClearInventory()">🗑️ Borrar inventario completo</button>
+        <button class="btn btn-red btn-full" onclick="adminClearExpenses('felipe')">🗑️ Borrar gastos personales de Felipe</button>
+        <button class="btn btn-red btn-full" onclick="adminClearExpenses('melisa')">🗑️ Borrar gastos personales de Melisa</button>
+      </div>
+      <div class="auth-note" style="margin-top:8px">Las acciones de borrado piden confirmación y no se pueden deshacer</div>
+    </div>
+
+    <button class="btn btn-red btn-full" style="margin-top:14px" onclick="doLogout()">↩️ Cerrar sesión</button>
   </div>
 </div>
 
