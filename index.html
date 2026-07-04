@@ -55,7 +55,20 @@ const FIREBASE_CONFIG = {
 // En producción NUNCA pongas la clave aquí directamente.
 // Usa una Cloud Function de Firebase como proxy.
 // Para el MVP de prueba puedes pegarla aquí temporalmente.
-const ANTHROPIC_KEY = ""; // tu sk-ant-...
+// La clave se ingresa desde la app (Perfil → Configurar IA) y queda en
+// localStorage de cada dispositivo. NO la escribas aquí si tu repo es público.
+const ANTHROPIC_KEY_FALLBACK = "";
+function anthKey(){ return localStorage.getItem("lj6_anthKey") || ANTHROPIC_KEY_FALLBACK; }
+
+function configAnthropicKey(){
+  const cur=anthKey();
+  const v=prompt("Pega tu clave de API de Anthropic (empieza con sk-ant-).\nSe guarda solo en este dispositivo."+(cur?"\n\nYa hay una configurada — pega una nueva para reemplazarla, o escribe BORRAR para quitarla.":""),"");
+  if(v===null) return;
+  if(v.trim().toUpperCase()==="BORRAR"){ localStorage.removeItem("lj6_anthKey"); toast("🗑️ Clave de IA eliminada de este dispositivo"); return; }
+  if(!v.trim().startsWith("sk-ant-")){ toast("La clave debe empezar con sk-ant-","error"); return; }
+  localStorage.setItem("lj6_anthKey", v.trim());
+  toast("🤖 IA configurada — boletas, insights y ofertas activados");
+}
 
 // ════════════════════════════════════════════════
 //  IDs DEL HOGAR — sin backend adicional usamos
@@ -128,6 +141,17 @@ const LS = {
 };
 const $ = id => document.getElementById(id);
 const clp = n => "$"+(Math.round(n)||0).toLocaleString("es-CL");
+// Parsear montos escritos con puntos de miles ("45.000" → 45000)
+const parseCLP = v => parseInt(String(v||"").replace(/\D/g,""))||0;
+// Auto-formato de miles mientras se escribe
+function fmtMoneyInput(el){
+  const n=parseCLP(el.value);
+  el.value=n?n.toLocaleString("es-CL"):"";
+}
+// Nombres cortos para mostrar (los datos guardan "Felipe"/"Melisa")
+const SHORT_NAME={Felipe:"Felipe",felipe:"Felipe",Melisa:"Meli",melisa:"Meli"};
+const shortName=n=>SHORT_NAME[n]||n||"—";
+const isFel=n=>String(n||"").toLowerCase().startsWith("f");
 const today = () => new Date().toISOString().slice(0,10);
 const todayFmt = () => new Date().toLocaleDateString("es-CL",{weekday:"long",day:"numeric",month:"long"});
 const uid = () => Math.random().toString(36).slice(2,10);
@@ -585,7 +609,7 @@ function renderDashboard() {
     </div>`;
 
   // Donut
-  const fTotal=sharedDebts.filter(d=>d.payer===name_).reduce((a,d)=>a+d.amount,0);
+  const fTotal=sharedDebts.filter(d=>isFel(d.payer)).reduce((a,d)=>a+d.amount,0);
   const mTotal=sharedTotal-fTotal;
   const circ=2*Math.PI*48, tot=sharedTotal||1;
   const fD=circ*(fTotal/tot), mD=circ*(mTotal/tot);
@@ -594,8 +618,8 @@ function renderDashboard() {
   $("donutM").setAttribute("stroke-dashoffset",`${-fD}`);
   $("donutTotal").textContent=clp(sharedTotal);
   $("donutLegend").innerHTML=`
-    <div class="dleg"><div class="dleg-dot" style="background:#6B4EFF"></div><div class="dleg-name">${name_}</div><div class="dleg-amt" style="color:var(--accent)">${clp(fTotal)}</div></div>
-    <div class="dleg"><div class="dleg-dot" style="background:#FF6B9A"></div><div class="dleg-name">Otra persona</div><div class="dleg-amt" style="color:#FF6B9A">${clp(mTotal)}</div></div>`;
+    <div class="dleg"><div class="dleg-dot" style="background:#6B4EFF"></div><div class="dleg-name">Felipe</div><div class="dleg-amt" style="color:var(--accent)">${clp(fTotal)}</div></div>
+    <div class="dleg"><div class="dleg-dot" style="background:#FF6B9A"></div><div class="dleg-name">Meli</div><div class="dleg-amt" style="color:#FF6B9A">${clp(mTotal)}</div></div>`;
 
   // Category breakdown
   const catTotals={};
@@ -650,6 +674,7 @@ function renderFinanzas() {
     </div>`).join("");
 
   renderFinDonut(allExp);
+  renderProjection(allExp);
 
   const filtered = selectedFinCat ? allExp.filter(e=>e.cat===selectedFinCat) : allExp;
   const total    = filtered.reduce((a,e)=>a+e.amount,0);
@@ -694,6 +719,65 @@ function renderFinanzas() {
 }
 
 function selectFinCat(id){ selectedFinCat=(id===null||selectedFinCat===id)?null:id; renderFinanzas(); }
+
+// ── Ingreso mensual + proyección de fin de mes ──
+function getIncome(){ return parseCLP(localStorage.getItem("lj6_income_"+currentUser.uid)); }
+
+function setIncome(){
+  const cur=getIncome();
+  const v=prompt("¿Cuál es tu ingreso mensual aproximado (líquido)?\nSe usa solo para proyectar tu mes — queda guardado en este dispositivo.", cur?cur.toLocaleString("es-CL"):"");
+  if(v===null) return;
+  const n=parseCLP(v);
+  if(!n){ toast("Ingresa un monto válido","error"); return; }
+  localStorage.setItem("lj6_income_"+currentUser.uid, String(n));
+  renderFinanzas();
+  toast("💰 Ingreso mensual guardado: "+clp(n));
+}
+
+// Días hasta el próximo pago (día 30; si el mes no tiene 30, el último día)
+function daysToPayday(){
+  const now=new Date();
+  const y=now.getFullYear(), m=now.getMonth();
+  const lastDay=new Date(y,m+1,0).getDate();
+  let pay=new Date(y,m,Math.min(30,lastDay));
+  if(now.getDate()>Math.min(30,lastDay)){ const l2=new Date(y,m+2,0).getDate(); pay=new Date(y,m+1,Math.min(30,l2)); }
+  return Math.max(0,Math.ceil((pay-now)/86400000));
+}
+
+function renderProjection(allExp){
+  const card=$("projCard"); if(!card) return;
+  const income=getIncome();
+  if(!income){
+    card.innerHTML=`<div class="proj-setup">
+      <div style="font-size:13px;font-weight:700">📈 ¿Cómo terminarás el mes?</div>
+      <div style="font-size:11.5px;color:var(--text2);margin:4px 0 10px">Define tu ingreso mensual y te proyecto el balance considerando tus gastos y las deudas del hogar</div>
+      <button class="btn btn-accent btn-sm" onclick="setIncome()">💰 Definir ingreso mensual</button>
+    </div>`;
+    return;
+  }
+  const mes=today().slice(0,7);
+  const gastoMes=allExp.filter(e=>(e.date||"").startsWith(mes)).reduce((a,e)=>a+e.amount,0);
+  // Balance del hogar desde mi perspectiva (+ me deben / − debo)
+  const bal=computeDebtBalances(STATE.debts);
+  const myNet=isFel(currentUser.displayName)?bal.felipeNet:-bal.felipeNet;
+  const proyectado=income-gastoMes+myNet;
+  const dPay=daysToPayday();
+  const diario=dPay>0?Math.round(Math.max(proyectado,0)/dPay):0;
+  const pct=Math.min(100,Math.round(gastoMes/income*100));
+  card.innerHTML=`
+    <div class="proj-head">
+      <div>📈 Proyección del mes <span class="proj-edit" onclick="setIncome()">✏️ editar ingreso</span></div>
+      <div class="proj-pay">💰 Sueldo en ${dPay} día${dPay===1?"":"s"} (día 30)</div>
+    </div>
+    <div class="proj-grid">
+      <div class="proj-cell"><div class="proj-l">Ingreso mensual</div><div class="proj-v">${clp(income)}</div></div>
+      <div class="proj-cell"><div class="proj-l">Gastado este mes</div><div class="proj-v" style="color:var(--red)">−${clp(gastoMes)}</div></div>
+      <div class="proj-cell"><div class="proj-l">Balance hogar</div><div class="proj-v" style="color:${myNet>=0?"var(--green)":"var(--red)"}">${myNet>=0?"+":"−"}${clp(Math.abs(Math.round(myNet)))}</div></div>
+      <div class="proj-cell hl"><div class="proj-l">Terminarías con</div><div class="proj-v" style="color:${proyectado>=0?"var(--green)":"var(--red)"}">${proyectado<0?"−":""}${clp(Math.abs(Math.round(proyectado)))}</div></div>
+    </div>
+    <div class="proj-bar"><div class="proj-bar-fill" style="width:${pct}%;background:${pct>85?"var(--red)":pct>60?"var(--yellow)":"var(--green)"}"></div></div>
+    <div class="proj-note">${pct}% del ingreso gastado${dPay>0&&proyectado>0?` · puedes gastar ~${clp(diario)}/día hasta el sueldo`:""}${proyectado<0?" · ⚠️ proyección negativa — revisa tus gastos":""}</div>`;
+}
 
 // ── Donut interactivo de gastos personales ──
 function renderFinDonut(allExp){
@@ -744,7 +828,7 @@ function selectSheetCat(id){
 
 async function addExpense() {
   const desc   = $("expDesc").value.trim();
-  const amount = parseInt($("expAmount").value)||0;
+  const amount = parseCLP($("expAmount").value);
   const date   = $("expDate").value||today();
   if(!desc||!amount){ toast("Completa descripción y monto","error"); return; }
   const uid_ = currentUser.uid;
@@ -814,7 +898,7 @@ async function loadEstadoCuenta(e) {
 
 async function analyzeEstadoCuenta() {
   if(!estadoCuentaText){ toast("Primero carga tu estado de cuenta","error"); return; }
-  if(!ANTHROPIC_KEY){ toast("Configura tu clave de API de Anthropic para usar la IA","error"); return; }
+  if(!anthKey()){ toast("Configura la IA: toca tu avatar → 🤖 Configurar IA","error"); return; }
   setLoading(true,"🤖 Analizando con IA...");
   try {
     const name_=currentUser.displayName||currentUser.email.split("@")[0];
@@ -841,7 +925,7 @@ ${estadoCuentaText.slice(0,8000)}`;
 
     const res=await fetch("https://api.anthropic.com/v1/messages",{
       method:"POST",
-      headers:{"Content-Type":"application/json","x-api-key":ANTHROPIC_KEY,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
+      headers:{"Content-Type":"application/json","x-api-key":anthKey(),"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
       body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:3000,messages:[{role:"user",content:prompt}]})
     });
     if(!res.ok) throw new Error("API error "+res.status);
@@ -892,7 +976,7 @@ function showEstadoResults(parsed) {
 
 // ── INSIGHTS IA (análisis de hábitos) ──
 async function runInsights() {
-  if(!ANTHROPIC_KEY){ toast("Configura tu clave de Anthropic","error"); return; }
+  if(!anthKey()){ toast("Configura la IA: toca tu avatar → 🤖 Configurar IA","error"); return; }
   const uid_=currentUser.uid;
   const exp=STATE.expenses[uid_]||[];
   if(exp.length<3){ toast("Necesitas al menos 3 gastos registrados para generar insights","error"); return; }
@@ -917,7 +1001,7 @@ Responde SOLO en JSON:
 }`;
     const res=await fetch("https://api.anthropic.com/v1/messages",{
       method:"POST",
-      headers:{"Content-Type":"application/json","x-api-key":ANTHROPIC_KEY,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
+      headers:{"Content-Type":"application/json","x-api-key":anthKey(),"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
       body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:1500,messages:[{role:"user",content:prompt}]})
     });
     if(!res.ok) throw new Error("API "+res.status);
@@ -1072,7 +1156,18 @@ function renderInventario(){
     grid.innerHTML=`<div class="empty-state" style="grid-column:1/-1"><div class="es-icon">🏠</div><div class="es-title">Inventario vacío</div><div class="es-sub">Agrega tu primer producto o escanea una boleta</div></div>`;
     return;
   }
-  grid.innerHTML=list.map(item=>{
+  // Agrupar por categoría (en el orden de CAT_EMOJI)
+  const catOrder=Object.keys(CAT_EMOJI);
+  const groups={};
+  list.forEach(i=>{ const c=CAT_EMOJI[i.cat]?i.cat:"Otros"; (groups[c]=groups[c]||[]).push(i); });
+  grid.innerHTML=catOrder.filter(c=>groups[c]).map(c=>`
+    <div class="inv-cat-header" style="grid-column:1/-1">${CAT_EMOJI[c]} ${c} <span class="inv-cat-count">${groups[c].length}</span></div>
+    ${groups[c].map(item=>renderInvCard(item)).join("")}`).join("");
+  updateBadges();
+}
+
+function renderInvCard(item){
+  return [item].map(item=>{
     const st=invStatus(item);
     const d=daysLeft(item);
     const runOut=d>0?new Date(Date.now()+d*86400000).toLocaleDateString("es-CL",{day:"numeric",month:"short"}):"";
@@ -1095,7 +1190,6 @@ function renderInventario(){
       </div>
     </div>`;
   }).join("");
-  updateBadges();
 }
 
 async function addInvItem(){
@@ -1240,8 +1334,8 @@ function processImage(file){
 }
 
 async function analyzeImage(b64data,mime){
-  if(!ANTHROPIC_KEY){
-    showBoletaError("Configura tu clave de API de Anthropic para analizar imágenes");
+  if(!anthKey()){
+    showBoletaError("Configura la IA: toca tu avatar → 🤖 Configurar IA (clave de Anthropic)");
     return;
   }
   const b64=b64data.replace(/^data:[^;]+;base64,/,"");
@@ -1249,7 +1343,7 @@ async function analyzeImage(b64data,mime){
   try{
     const res=await fetch("https://api.anthropic.com/v1/messages",{
       method:"POST",
-      headers:{"Content-Type":"application/json","x-api-key":ANTHROPIC_KEY,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
+      headers:{"Content-Type":"application/json","x-api-key":anthKey(),"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
       body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:2000,messages:[{role:"user",content:[
         {type:"image",source:{type:"base64",media_type:apiMime,data:b64}},
         {type:"text",text:"Analiza esta boleta de supermercado chileno. Extrae TODOS los productos. Responde SOLO JSON sin texto extra:\n{\"store\":\"tienda\",\"date\":\"dd/mm/aa\",\"items\":[{\"name\":\"producto\",\"qty\":1,\"unit\":\"un\",\"price\":1990}]}"}
@@ -1353,19 +1447,17 @@ async function addAllToInv(){
 // ══════════════════════════════════════════════════
 let debtPeriod="month";
 
+// Balance absoluto Felipe vs Meli (independiente de quién esté logueado)
 function computeDebtBalances(list){
   let fPaid=0,mPaid=0,fShould=0,mShould=0;
-  const myName=currentUser?.displayName||currentUser?.email?.split("@")[0]||"";
   list.filter(d=>!d.paid).forEach(d=>{
-    if(d.payer===myName||d.payer===currentUser?.uid) fPaid+=d.amount; else mPaid+=d.amount;
+    if(isFel(d.payer)) fPaid+=d.amount; else mPaid+=d.amount;
     if(d.owed==="Mitad"){ fShould+=d.amount/2; mShould+=d.amount/2; }
-    else if(d.owed===myName||d.owed===currentUser?.uid) fShould+=d.amount;
+    else if(isFel(d.owed)) fShould+=d.amount;
     else mShould+=d.amount;
   });
   const felipeNet=fPaid-fShould, owed=Math.abs(felipeNet);
-  return {fPaid,mPaid,fShould,mShould,felipeNet,owed,
-    totalFelipe:list.filter(d=>!d.paid&&(d.payer===myName||d.payer===currentUser?.uid)).reduce((a,d)=>a+d.amount,0),
-    totalMelisa:list.filter(d=>!d.paid&&d.payer!==myName&&d.payer!==currentUser?.uid).reduce((a,d)=>a+d.amount,0)};
+  return {fPaid,mPaid,fShould,mShould,felipeNet,owed,totalFelipe:fPaid,totalMelisa:mPaid};
 }
 
 function setDebtPeriod(p,el){
@@ -1396,28 +1488,27 @@ function getDebtPeriodList(){
 function renderDeudas(){
   const pList=getDebtPeriodList();
   const bal=computeDebtBalances(pList);
-  const myName=currentUser?.displayName||currentUser?.email?.split("@")[0]||"Yo";
 
   $("debtHero").innerHTML=`
     <div class="debt-hero-top">
       <div class="dh-user">
-        <div class="dh-avatar" style="background:linear-gradient(135deg,#6B4EFF,#4E9FFF)">${myName[0]}</div>
-        <div class="dh-name">${myName}</div>
-        <div class="dh-paid" style="color:var(--accent)">${clp(bal.totalFelipe)}</div>
+        <div class="dh-avatar" style="background:linear-gradient(135deg,#6B4EFF,#4E9FFF)">F</div>
+        <div class="dh-name">Felipe</div>
+        <div class="dh-paid" style="color:var(--accent)">${clp(bal.fPaid)}</div>
         <div class="dh-should">Le tocaba ${clp(Math.round(bal.fShould))}</div>
       </div>
       <div class="dh-vs">vs</div>
       <div class="dh-user">
-        <div class="dh-avatar" style="background:linear-gradient(135deg,#FF6B9A,#FF6B6B)">O</div>
-        <div class="dh-name">Otra persona</div>
-        <div class="dh-paid" style="color:#FF6B9A">${clp(bal.totalMelisa)}</div>
+        <div class="dh-avatar" style="background:linear-gradient(135deg,#FF6B9A,#FF6B6B)">M</div>
+        <div class="dh-name">Meli</div>
+        <div class="dh-paid" style="color:#FF6B9A">${clp(bal.mPaid)}</div>
         <div class="dh-should">Le tocaba ${clp(Math.round(bal.mShould))}</div>
       </div>
     </div>`;
 
   $("debtBalancePill").innerHTML=bal.owed<500
     ?`<div class="debt-balance-pill dbp-ok">🤝 Balance equilibrado — diferencia menor a $500</div>`
-    :`<div class="debt-balance-pill dbp-owe">💸 ${bal.felipeNet<0?myName:"Otra persona"} le debe <strong>${clp(Math.round(bal.owed))}</strong> a ${bal.felipeNet<0?"la otra persona":myName}</div>`;
+    :`<div class="debt-balance-pill dbp-owe">💸 ${bal.felipeNet<0?"Felipe":"Meli"} le debe <strong>${clp(Math.round(bal.owed))}</strong> a ${bal.felipeNet<0?"Meli":"Felipe"}</div>`;
 
   const CAT_EM={"Supermercado":"🛒","Servicios":"💡","Arriendo":"🏠","Salidas":"🍽️","Salud":"🏥","Transporte":"🚗","Otro":"📦"};
   const dEl=$("debtList");
@@ -1426,17 +1517,17 @@ function renderDeudas(){
     updateBadges(); return;
   }
   dEl.innerHTML=pList.map(d=>{
-    const other=d.payer===myName?"otra persona":d.payer;
+    const payerS=shortName(d.payer), otherS=isFel(d.payer)?"Meli":"Felipe";
     const rawDate=d.date||(d.createdAt?.seconds?new Date(d.createdAt.seconds*1000).toISOString().slice(0,10):today());
     const owedStr=d.owed==="Mitad"
-      ?`${d.payer===myName?"Otra persona":d.payer} debe ${clp(Math.round(d.amount/2))}`
-      :d.owed===d.payer?`Sin deuda para ${other}`
-      :`${d.owed} debe ${clp(d.amount)}`;
+      ?`${otherS} debe ${clp(Math.round(d.amount/2))}`
+      :d.owed===d.payer?`Sin deuda para ${otherS}`
+      :`${shortName(d.owed)} debe ${clp(d.amount)}`;
     return `<div class="debt-item${d.paid?" paid":""}">
-      <div class="di-avatar" style="background:${d.payer===myName?"linear-gradient(135deg,#6B4EFF,#4E9FFF)":"linear-gradient(135deg,#FF6B9A,#FF6B6B)"}">${(d.payer||"?")[0]}</div>
+      <div class="di-avatar" style="background:${isFel(d.payer)?"linear-gradient(135deg,#6B4EFF,#4E9FFF)":"linear-gradient(135deg,#FF6B9A,#FF6B6B)"}">${payerS[0]}</div>
       <div class="di-info">
         <div class="di-name">${d.desc}</div>
-        <div class="di-breakdown">Pagó ${d.payer} ${clp(d.amount)} → <strong>${owedStr}</strong></div>
+        <div class="di-breakdown">Pagó ${payerS} ${clp(d.amount)} → <strong>${owedStr}</strong></div>
         <div class="di-meta">${rawDate} · ${d.addedByName||d.addedBy||"—"}</div>
         <div class="di-tags">
           <span class="di-tag cat">${CAT_EM[d.cat]||"📦"} ${d.cat}</span>
@@ -1457,7 +1548,7 @@ function renderDeudas(){
 
 async function addDebt(){
   const desc=  $("dDesc").value.trim();
-  const amount=parseInt($("dAmount").value)||0;
+  const amount=parseCLP($("dAmount").value);
   const payer= $("dPayer").value;
   const owed=  $("dOwed").value;
   const cat=   $("dCat").value;
@@ -1488,17 +1579,15 @@ async function removeDebt(id){
 
 // Debt preview
 function updateDebtPreview(){
-  const amt=parseInt($("dAmount").value)||0;
-  const payer=$("dPayer").value;
-  const owed=$("dOwed").value;
-  const myName=currentUser?.displayName||"Yo";
+  const amt=parseCLP($("dAmount").value);
+  const payer=$("dPayer").value, owed=$("dOwed").value;
   const prev=$("debtPreview"); if(!prev) return;
   if(!amt){ prev.style.display="none"; return; }
-  const other=payer===myName?"la otra persona":"la otra persona";
+  const payerS=shortName(payer), otherS=isFel(payer)?"Meli":"Felipe";
   let msg="";
-  if(owed==="Mitad") msg=`${payer} paga ${clp(amt)} → la otra parte le debe devolver ${clp(Math.round(amt/2))}`;
-  else if(owed===payer) msg=`${payer} asume el 100% — sin deuda para la otra persona`;
-  else msg=`${payer} paga ${clp(amt)} → ${owed} le debe devolver ${clp(amt)} completo`;
+  if(owed==="Mitad") msg=`${payerS} paga ${clp(amt)} → ${otherS} le debe devolver ${clp(Math.round(amt/2))}`;
+  else if(owed===payer) msg=`${payerS} asume el 100% — sin deuda para ${otherS}`;
+  else msg=`${payerS} paga ${clp(amt)} → ${shortName(owed)} le debe devolver ${clp(amt)} completo`;
   prev.textContent="💡 "+msg; prev.style.display="block";
 }
 
@@ -1569,7 +1658,7 @@ function ofertaToShop(name){
 async function fetchOfertas(force){
   const cache=LS.get("ofertas");
   if(!force&&cache&&cache.week===weekKey()){ renderOfertas(); return; }
-  if(!ANTHROPIC_KEY){ toast("Configura tu clave de API de Anthropic para buscar ofertas","error"); return; }
+  if(!anthKey()){ toast("Configura la IA: toca tu avatar → 🤖 Configurar IA","error"); return; }
   setLoading(true,"Buscando ofertas en supermercados de Antofagasta...");
   try{
     const prompt=`Busca en la web las ofertas y promociones VIGENTES ESTA SEMANA en supermercados de Antofagasta, Chile: Líder, Jumbo, Santa Isabel, Unimarc y Tottus. Prioriza alimentos: carnes, lácteos, abarrotes, frutas/verduras, bebidas y productos de limpieza. Incluye solo ofertas con precio concreto en pesos chilenos.
@@ -1580,7 +1669,7 @@ Responde SOLO con JSON válido, sin texto adicional ni markdown:
 Usa exactamente estos nombres de supermercado: Líder, Jumbo, Santa Isabel, Unimarc, Tottus. Entre 10 y 25 ofertas en total. Si de algún supermercado no encuentras nada confiable, omítelo.`;
     const res=await fetch("https://api.anthropic.com/v1/messages",{
       method:"POST",
-      headers:{"Content-Type":"application/json","x-api-key":ANTHROPIC_KEY,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
+      headers:{"Content-Type":"application/json","x-api-key":anthKey(),"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
       body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:4000,
         messages:[{role:"user",content:prompt}],
         tools:[{type:"web_search_20250305",name:"web_search",max_uses:6}]})
@@ -1648,7 +1737,8 @@ function checkReminders(){
   if(!low.length) return;
 
   // Solicitar permiso para notificaciones push (PWA)
-  if("Notification" in window && Notification.permission==="default"){
+  if(!("Notification" in window)) return; // iOS Safari sin PWA no lo soporta
+  if(Notification.permission==="default"){
     Notification.requestPermission().then(perm=>{
       if(perm==="granted") scheduleNotifications(low);
     });
@@ -1734,7 +1824,7 @@ async function exportPDF(){
   <div class="tot">${clp(STATE.debts.reduce((a,d)=>a+d.amount,0))}</div>
   ${bal.owed<500
     ?`<div class="pill pill-g">✅ Balance equilibrado</div>`
-    :`<div class="pill pill-r">💸 ${bal.felipeNet<0?myName:"Otra persona"} debe ${clp(Math.round(bal.owed))}</div>`}
+    :`<div class="pill pill-r">💸 ${bal.felipeNet<0?"Felipe":"Meli"} debe ${clp(Math.round(bal.owed))}</div>`}
   <table>
     <thead><tr><th>Fecha</th><th>Descripción</th><th>Pagó</th><th>División</th><th>Estado</th><th>Monto</th></tr></thead>
     <tbody>
@@ -1893,6 +1983,20 @@ img{display:block;max-width:100%}
 .role-badge.admin{background:rgba(255,185,70,.14);border-color:rgba(255,185,70,.4);color:var(--yellow,#FFB946)}
 .admin-title{font-size:11px;font-weight:800;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin:18px 0 10px;padding-top:14px;border-top:1px solid var(--border)}
 .admin-grid{display:flex;flex-direction:column;gap:8px}
+.inv-cat-header{display:flex;align-items:center;gap:7px;font-size:12px;font-weight:800;color:var(--text2);text-transform:uppercase;letter-spacing:.7px;padding:10px 2px 2px;border-bottom:1px solid var(--border);margin-bottom:2px}
+.inv-cat-count{background:var(--bg3);color:var(--text3);border-radius:10px;padding:1px 8px;font-size:10px}
+.proj-card,.proj-setup{margin:0 18px 14px;background:var(--sur);border:1px solid var(--border);border-radius:var(--r-l);padding:15px 17px;box-shadow:var(--sh)}
+.proj-head{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:5px;font-size:13px;font-weight:800;margin-bottom:11px}
+.proj-edit{font-size:10.5px;font-weight:700;color:var(--accent2);cursor:pointer;margin-left:5px}
+.proj-pay{font-size:10.5px;font-weight:700;color:var(--yellow);background:var(--yellowbg);border-radius:14px;padding:3px 9px}
+.proj-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:11px}
+.proj-cell{background:var(--bg2);border-radius:var(--r-s);padding:9px 11px}
+.proj-cell.hl{background:var(--accentbg);border:1px solid var(--privbr)}
+.proj-l{font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;margin-bottom:2px}
+.proj-v{font-size:15px;font-weight:800;font-family:"Fraunces",serif}
+.proj-bar{height:7px;background:var(--bg3);border-radius:5px;overflow:hidden;margin-bottom:7px}
+.proj-bar-fill{height:100%;border-radius:5px;transition:width .6s ease}
+.proj-note{font-size:11px;color:var(--text2)}
 
 /* ── Donut finanzas ── */
 .fin-donut-card{margin:0 18px 14px;background:var(--sur);border:1px solid var(--border);border-radius:var(--r-l);padding:16px 18px;box-shadow:var(--sh)}
@@ -2331,6 +2435,8 @@ img{display:block;max-width:100%}
         </div>
       </div>
 
+      <div class="proj-card" id="projCard"></div>
+
       <div class="finance-summary">
         <div class="fin-total-label">Gasto total registrado</div>
         <div class="fin-total"><span>$</span><span id="finTotalVal">0</span></div>
@@ -2514,7 +2620,7 @@ img{display:block;max-width:100%}
     <div style="display:flex;flex-direction:column;gap:12px">
       <div class="field-group"><label>Descripción</label><input class="field-input" id="expDesc" type="text" placeholder="Ej: Bencina Shell Calama"></div>
       <div class="field-row">
-        <div class="field-group"><label>Monto CLP</label><input class="field-input" id="expAmount" type="number" placeholder="45000" min="0"></div>
+        <div class="field-group"><label>Monto CLP</label><input class="field-input" id="expAmount" type="text" inputmode="numeric" placeholder="45.000" oninput="fmtMoneyInput(this)"></div>
         <div class="field-group"><label>Fecha</label><input class="field-input" id="expDate" type="date"></div>
       </div>
       <div class="field-group">
@@ -2573,12 +2679,12 @@ img{display:block;max-width:100%}
     <div style="display:flex;flex-direction:column;gap:12px">
       <div class="field-group"><label>Descripción</label><input class="field-input" id="dDesc" type="text" placeholder="Ej: Supermercado Jumbo semanal"></div>
       <div class="field-row">
-        <div class="field-group"><label>Monto CLP</label><input class="field-input" id="dAmount" type="number" placeholder="45000"></div>
+        <div class="field-group"><label>Monto CLP</label><input class="field-input" id="dAmount" type="text" inputmode="numeric" placeholder="45.000" oninput="fmtMoneyInput(this)"></div>
         <div class="field-group">
           <label>¿Quién pagó?</label>
           <select class="field-input" id="dPayer">
             <option value="Felipe">Felipe</option>
-            <option value="Melisa">Melisa</option>
+            <option value="Melisa">Meli</option>
           </select>
         </div>
       </div>
@@ -2588,7 +2694,7 @@ img{display:block;max-width:100%}
           <select class="field-input" id="dOwed">
             <option value="Mitad">Mitad c/u</option>
             <option value="Felipe">Felipe (100%)</option>
-            <option value="Melisa">Melisa (100%)</option>
+            <option value="Melisa">Meli (100%)</option>
           </select>
         </div>
         <div class="field-group">
@@ -2624,6 +2730,7 @@ img{display:block;max-width:100%}
 
     <button class="btn btn-ghost btn-full" style="margin-bottom:8px" onclick="changeOwnPassword()">🔑 Cambiar mi contraseña</button>
     <button class="btn btn-ghost btn-full" style="margin-bottom:8px" onclick="forgetSavedPassword()">🔒 Olvidar contraseña guardada en este dispositivo</button>
+    <button class="btn btn-ghost btn-full" style="margin-bottom:8px" onclick="configAnthropicKey()">🤖 Configurar IA (clave de Anthropic)</button>
 
     <div id="adminPanel" style="display:none">
       <div class="admin-title">Panel de administración</div>
