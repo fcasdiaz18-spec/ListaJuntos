@@ -1,11 +1,11 @@
 <!DOCTYPE html>
-<html lang="es" data-theme="dark">
+<html lang="es" data-theme="light">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0,viewport-fit=cover,maximum-scale=1.0,user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="theme-color" content="#080B14">
+<meta name="theme-color" content="#F6F7FB">
 <title>ListaJuntos</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,wght@0,300;0,600;0,700;1,300&family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
@@ -15,7 +15,39 @@
      Las contraseñas se guardan como hash SHA-256 con salt, nunca en texto plano.
      El admin puede cambiar contraseñas desde el Panel de administración.
 -->
+<!-- Firebase (SDK compat, funciona en script clásico) -->
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
+
 <script>
+// ══════════════════════════════════════════════════
+//  ⚙️ SINCRONIZACIÓN EN LÍNEA (Firebase) — CONFIGURA AQUÍ
+// ══════════════════════════════════════════════════
+// Para que Felipe y Melisa vean el mismo inventario desde
+// distintos teléfonos:
+//   1. Ve a https://console.firebase.google.com → Crear proyecto
+//   2. Agrega una "app web" y copia el firebaseConfig aquí abajo
+//   3. En Authentication → Sign-in method: habilita "Anónimo"
+//   4. En Firestore Database: crea la base (modo producción)
+//   5. En Firestore → Reglas, pega:
+//        rules_version = '2';
+//        service cloud.firestore {
+//          match /databases/{database}/documents {
+//            match /households/{h}/{document=**} {
+//              allow read, write: if request.auth != null;
+//            }
+//          }
+//        }
+// Si dejas esto vacío, la app funciona igual pero solo local.
+const FIREBASE_CONFIG = {
+  apiKey:            "AIzaSyBYbiozV564NqNxpOfh1DwUZvsCj2N1Q48",
+  authDomain:        "lista-juntos-47ef9.firebaseapp.com",
+  projectId:         "lista-juntos-47ef9",
+  storageBucket:     "lista-juntos-47ef9.firebasestorage.app",
+  messagingSenderId: "1008359833495",
+  appId:             "1:1008359833495:web:0ec5d54aa8826efd3cced2"
+};
 
 // ════════════════════════════════════════════════
 //  ⚙️  CLAVE DE API DE ANTHROPIC (para IA)
@@ -51,9 +83,29 @@ const USERS = {
   }
 };
 
-let db = null;          // sin Firebase — todo se guarda en localStorage
+let db = null;           // Firestore si está configurado; si no, solo localStorage
+let syncOn = false;      // true cuando la conexión anónima a Firebase está lista
+let syncStarted = false;
 let currentUser = null;
 let unsubListeners = [];
+
+function initFirebase() {
+  try {
+    if (!FIREBASE_CONFIG.apiKey) { updateSyncUI(); return; }
+    firebase.initializeApp(FIREBASE_CONFIG);
+    db = firebase.firestore();
+    firebase.auth().signInAnonymously()
+      .then(() => { syncOn = true; updateSyncUI(); if (currentUser) initSync(); })
+      .catch(e => { console.warn("Firebase auth:", e.message); db = null; updateSyncUI(); });
+  } catch (e) { console.warn("Firebase:", e.message); db = null; updateSyncUI(); }
+}
+
+function updateSyncUI() {
+  const el = $("invSyncStatus");
+  if (el) el.innerHTML = syncOn
+    ? "🟢 Sincronizado en línea — Felipe y Melisa ven lo mismo al instante"
+    : "📴 Solo este dispositivo — configura Firebase en el código para sync en línea";
+}
 
 // SHA-256 con Web Crypto (GitHub Pages es HTTPS, siempre disponible)
 async function sha256(txt) {
@@ -110,11 +162,21 @@ let STATE = {
 // ══════════════════════════════════════════════════
 let selectedUid = null;
 
-function selectUser(uid_) {
+async function selectUser(uid_) {
   selectedUid = uid_;
   document.querySelectorAll(".user-card").forEach(c => c.classList.remove("sel"));
   $("ucard-" + uid_).classList.add("sel");
+  // Si el usuario guardó su contraseña en este dispositivo (y no ha cambiado), entra directo
+  const trust = localStorage.getItem("lj6_trust_" + uid_);
+  if (trust && trust === getUserHash(uid_)) {
+    setLoading(true, "Iniciando sesión...");
+    LS.set("session", { uid: uid_, ts: Date.now() });
+    await startSession(uid_);
+    toast("🔓 Bienvenido, " + USERS[uid_].name + " — contraseña guardada");
+    return;
+  }
   $("loginPassword").value = "";
+  $("rememberPwd").checked = false;
   $("loginPwdWrap").style.display = "flex";
   $("loginPassword").focus();
 }
@@ -129,6 +191,9 @@ async function doLogin() {
     setLoading(false);
     toast("Contraseña incorrecta", "error");
     return;
+  }
+  if ($("rememberPwd").checked) {
+    localStorage.setItem("lj6_trust_" + selectedUid, hash);
   }
   LS.set("session", { uid: selectedUid, ts: Date.now() });
   await startSession(selectedUid);
@@ -145,12 +210,15 @@ async function startSession(uid_) {
     color: u.color,
   };
   loadLocalData();
+  if (syncOn) initSync();
   setLoading(false);
   showApp();
 }
 
 function doLogout() {
   if (!confirm("¿Cerrar sesión?")) return;
+  unsubListeners.forEach(fn => { try { fn(); } catch(e){} });
+  unsubListeners = []; syncStarted = false;
   LS.set("session", null);
   currentUser = null;
   selectedUid = null;
@@ -180,11 +248,84 @@ function loadLocalData() {
     LS.get("exp_" + u.name) || LS.get("exp_" + currentUser.uid) || [];
 }
 
-// Helpers de persistencia (misma firma que la versión Firebase,
-// para no tocar el resto del código — aquí solo persisten en LS)
-async function fsSet(path, data) { /* persistencia la hace cada función vía LS.set */ }
-async function fsAdd(col, data)  { return uid(); }
-async function fsDel(path)       { /* idem */ }
+// Helpers de persistencia: escriben en Firestore si hay sync;
+// cada función además respalda en localStorage (modo offline)
+async function fsSet(path, data) {
+  if (!db || !syncOn) return;
+  try { await db.doc(path).set({ ...data, updatedAt: firebase.firestore.FieldValue.serverTimestamp() }, { merge: true }); }
+  catch (e) { console.warn("fs set:", e.message); }
+}
+async function fsAdd(col, data) {
+  if (db && syncOn) {
+    try {
+      const ref = await db.collection(col).add({ ...data, createdAt: firebase.firestore.FieldValue.serverTimestamp() });
+      return ref.id;
+    } catch (e) { console.warn("fs add:", e.message); }
+  }
+  return uid();
+}
+async function fsDel(path) {
+  if (!db || !syncOn) return;
+  try { await db.doc(path).delete(); } catch (e) { console.warn("fs del:", e.message); }
+}
+
+// ══════════════════════════════════════════════════
+//  SYNC EN TIEMPO REAL — inventario, gastos hogar, lista de compras
+// ══════════════════════════════════════════════════
+let seededInv = false, seededDebts = false;
+
+function initSync() {
+  if (!db || !syncOn || syncStarted || !currentUser) return;
+  syncStarted = true;
+  const base = `households/${HOUSEHOLD_ID}`;
+
+  // Inventario compartido
+  unsubListeners.push(db.collection(base + "/inventario").onSnapshot(async snap => {
+    if (snap.empty && STATE.inventario.length && !seededInv) {
+      // Primera conexión: subir el inventario local existente
+      seededInv = true;
+      for (const it of STATE.inventario) { const { id, ...rest } = it; await fsAdd(base + "/inventario", rest); }
+      return;
+    }
+    STATE.inventario = snap.docs.map(d => ({ id: d.id, ...d.data() }))
+      .sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+    LS.set("inv", STATE.inventario);
+    if (activePage === "inventario") renderInventario();
+    if (activePage === "dashboard") renderDashboard();
+    checkReminders(); updateBadges();
+  }, e => console.warn("sync inv:", e.message)));
+
+  // Gastos del hogar compartidos
+  unsubListeners.push(db.collection(base + "/debts").onSnapshot(async snap => {
+    if (snap.empty && STATE.debts.length && !seededDebts) {
+      seededDebts = true;
+      for (const d of STATE.debts) { const { id, ...rest } = d; await fsAdd(base + "/debts", rest); }
+      return;
+    }
+    STATE.debts = snap.docs.map(d => ({ id: d.id, ...d.data() }))
+      .sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+    LS.set("debts", STATE.debts);
+    if (activePage === "deudas") renderDeudas();
+    if (activePage === "dashboard") renderDashboard();
+    updateBadges();
+  }, e => console.warn("sync debts:", e.message)));
+
+  // Lista de compras compartida (documento único)
+  unsubListeners.push(db.doc(base + "/shared/shoplist").onSnapshot(snap => {
+    if (!snap.exists) { const local = getShopList(); if (local.length) saveShopList(local); return; }
+    LS.set("shoplist", snap.data().items || []);
+    if (activePage === "inventario") renderShopList();
+  }, e => console.warn("sync shoplist:", e.message)));
+}
+
+// Guardar lista de compras (local + nube si hay sync)
+function saveShopList(list) {
+  LS.set("shoplist", list);
+  if (db && syncOn) {
+    db.doc(`households/${HOUSEHOLD_ID}/shared/shoplist`).set({ items: list })
+      .catch(e => console.warn("shoplist sync:", e.message));
+  }
+}
 
 // ══════════════════════════════════════════════════
 //  CAMBIO DE CONTRASEÑA + PANEL DE ADMINISTRACIÓN
@@ -197,8 +338,21 @@ async function changeOwnPassword() {
   const nw = prompt("Nueva contraseña (mínimo 6 caracteres):");
   if (nw === null) return;
   if (nw.length < 6) { toast("Debe tener al menos 6 caracteres", "error"); return; }
-  localStorage.setItem("lj6_pwd_" + currentUser.uid, await sha256(PWD_SALT + nw));
+  const newHash = await sha256(PWD_SALT + nw);
+  localStorage.setItem("lj6_pwd_" + currentUser.uid, newHash);
+  // Si tenía la contraseña guardada en este dispositivo, actualizarla
+  if (localStorage.getItem("lj6_trust_" + currentUser.uid)) {
+    localStorage.setItem("lj6_trust_" + currentUser.uid, newHash);
+  }
   toast("🔑 Contraseña actualizada");
+}
+
+function forgetSavedPassword() {
+  if (!localStorage.getItem("lj6_trust_" + currentUser.uid)) {
+    toast("No tienes una contraseña guardada en este dispositivo"); return;
+  }
+  localStorage.removeItem("lj6_trust_" + currentUser.uid);
+  toast("🔒 Listo — se pedirá tu contraseña en el próximo inicio de sesión");
 }
 
 async function adminResetPassword(uid_) {
@@ -207,6 +361,7 @@ async function adminResetPassword(uid_) {
   if (nw === null) return;
   if (nw.length < 6) { toast("Debe tener al menos 6 caracteres", "error"); return; }
   localStorage.setItem("lj6_pwd_" + uid_, await sha256(PWD_SALT + nw));
+  localStorage.removeItem("lj6_trust_" + uid_); // deberá ingresarla de nuevo
   toast(`🔑 Contraseña de ${USERS[uid_].name} actualizada`);
 }
 
@@ -295,9 +450,10 @@ function navTo(id) {
   const pill = $("ctxPill");
   if(privPages.includes(id)) { pill.textContent="🔒 Personal"; pill.className="ctx-pill priv"; }
   else if(id==="dashboard") { pill.textContent="⊞ Inicio"; pill.className="ctx-pill"; }
+  else if(id==="ofertas") { pill.textContent="🏷️ Semana"; pill.className="ctx-pill shared"; }
   else { pill.textContent="👥 Compartido"; pill.className="ctx-pill shared"; }
   // Lazy renders
-  const renders = {finanzas:renderFinanzas,inventario:renderInventario,deudas:renderDeudas};
+  const renders = {finanzas:renderFinanzas,inventario:renderInventario,deudas:renderDeudas,ofertas:renderOfertas};
   if(renders[id]) renders[id]();
 }
 
@@ -316,12 +472,14 @@ function initAppUI() {
   $("dashGreeting").innerHTML = `${gr}, <em>${name}</em> 👋`;
   $("dashDate").textContent = todayFmt();
 
-  // Hero image
-  const hi = LS.get("heroImg");
-  if(hi) { $("heroImg").src=hi; $("heroImg").style.display="block"; $("heroBtnLbl").textContent="📷 Cambiar foto"; }
+  // Hero image: personal del usuario → default del hogar (la de Felipe) → legado
+  const hi = LS.get("heroImg_"+currentUser.uid) || LS.get("heroImgDefault") || LS.get("heroImg");
+  if(hi) { $("heroImg").src=hi; $("heroImg").style.display="block"; $("heroBtnLbl").textContent="📷 Cambiar mi foto"; }
+  else   { $("heroImg").style.display="none"; $("heroBtnLbl").textContent="📷 Agregar foto del hogar"; }
 
-  // Expense date default
+  // Expense date default + chips de categoría del sheet
   const ed = $("expDate"); if(ed) ed.value = today();
+  renderExpSheetCats();
 
   // Reminders check
   scheduleReminderCheck();
@@ -333,7 +491,7 @@ function initAppUI() {
 // ══════════════════════════════════════════════════
 //  THEME
 // ══════════════════════════════════════════════════
-let darkMode = LS.get("darkMode") !== false;
+let darkMode = LS.get("darkMode") === true; // claro por defecto
 function applyTheme() {
   document.documentElement.setAttribute("data-theme", darkMode?"dark":"light");
   $("themeIcon").textContent = darkMode?"☀️":"🌙";
@@ -348,9 +506,16 @@ function loadHeroImg(e) {
   const reader = new FileReader();
   reader.onload = ev => {
     $("heroImg").src=ev.target.result; $("heroImg").style.display="block";
-    $("heroBtnLbl").textContent="📷 Cambiar foto";
-    LS.set("heroImg", ev.target.result);
-    toast("📷 Foto del hogar actualizada");
+    $("heroBtnLbl").textContent="📷 Cambiar mi foto";
+    // Cada usuario guarda su propia foto de portada
+    LS.set("heroImg_"+currentUser.uid, ev.target.result);
+    if(isAdmin()){
+      // La foto del admin queda como default para quien no tenga una propia
+      LS.set("heroImgDefault", ev.target.result);
+      toast("📷 Foto actualizada — quedó como portada por defecto para ambos");
+    } else {
+      toast("📷 Tu foto de portada personal fue actualizada");
+    }
   };
   reader.readAsDataURL(file);
 }
@@ -362,6 +527,7 @@ const CAT_COLORS = ["#6B4EFF","#00D68F","#FF6B6B","#FFB946","#4E9FFF","#FF6B9A",
 
 function renderDashboard() {
   if(!currentUser) return;
+  renderResumenBanner();
   const uid_ = currentUser.uid;
   const name_ = currentUser.displayName || currentUser.email.split("@")[0];
   const now = new Date();
@@ -454,16 +620,17 @@ function renderDashboard() {
 // ══════════════════════════════════════════════════
 //  FINANZAS PERSONALES — PRIVADAS
 // ══════════════════════════════════════════════════
+// Ordenadas por tipo: primero deudas/créditos, luego gastos corrientes
 const PRIVATE_CATS = [
-  {id:"credito_hip",  label:"Crédito Hipotecario", emoji:"🏠",color:"#6B4EFF"},
-  {id:"credito_con",  label:"Crédito Consumo",     emoji:"💳",color:"#4E9FFF"},
-  {id:"deuda_pers",   label:"Deuda Personal",       emoji:"👤",color:"#FF6B9A"},
-  {id:"bencina",      label:"Bencina",              emoji:"⛽",color:"#FFB946"},
-  {id:"gym",          label:"Gym / Deporte",        emoji:"🏋️",color:"#00D68F"},
-  {id:"suscripciones",label:"Suscripciones",        emoji:"📱",color:"#A78BFA"},
-  {id:"salud",        label:"Salud",                emoji:"🏥",color:"#FF6B6B"},
-  {id:"supermercado", label:"Supermercado",          emoji:"🛒",color:"#34D399"},
-  {id:"otros",        label:"Otros",                emoji:"📦",color:"#9BA3C2"},
+  {id:"credito_hip",  label:"Crédito Hipotecario", emoji:"🏠",color:"#6B4EFF", grupo:"deuda"},
+  {id:"credito_con",  label:"Crédito Consumo",     emoji:"💳",color:"#4E9FFF", grupo:"deuda"},
+  {id:"deuda_pers",   label:"Deuda Personal",       emoji:"👤",color:"#FF6B9A", grupo:"deuda"},
+  {id:"supermercado", label:"Supermercado",          emoji:"🛒",color:"#34D399", grupo:"gasto"},
+  {id:"bencina",      label:"Bencina",              emoji:"⛽",color:"#FFB946", grupo:"gasto"},
+  {id:"salud",        label:"Salud",                emoji:"🏥",color:"#FF6B6B", grupo:"gasto"},
+  {id:"gym",          label:"Gym / Deporte",        emoji:"🏋️",color:"#00D68F", grupo:"gasto"},
+  {id:"suscripciones",label:"Suscripciones",        emoji:"📱",color:"#A78BFA", grupo:"gasto"},
+  {id:"otros",        label:"Otros",                emoji:"📦",color:"#9BA3C2", grupo:"gasto"},
 ];
 
 let selectedFinCat = null;
@@ -474,11 +641,15 @@ function renderFinanzas() {
   const uid_ = currentUser.uid;
   const allExp = STATE.expenses[uid_] || LS.get("exp_"+(currentUser.displayName||"user")) || [];
 
-  // Cat filter chips
-  $("finCatChips").innerHTML = PRIVATE_CATS.map(c=>`
+  // Chips: "Todos" consolida, luego deudas, luego gastos
+  $("finCatChips").innerHTML =
+    `<div class="cat-chip all ${selectedFinCat===null?"sel":""}" onclick="selectFinCat(null)">🧮 Todos</div>` +
+    PRIVATE_CATS.map(c=>`
     <div class="cat-chip ${selectedFinCat===c.id?"sel":""}" onclick="selectFinCat('${c.id}')">
       ${c.emoji} ${c.label}
     </div>`).join("");
+
+  renderFinDonut(allExp);
 
   const filtered = selectedFinCat ? allExp.filter(e=>e.cat===selectedFinCat) : allExp;
   const total    = filtered.reduce((a,e)=>a+e.amount,0);
@@ -522,7 +693,49 @@ function renderFinanzas() {
   }).join("");
 }
 
-function selectFinCat(id){ selectedFinCat=selectedFinCat===id?null:id; renderFinanzas(); }
+function selectFinCat(id){ selectedFinCat=(id===null||selectedFinCat===id)?null:id; renderFinanzas(); }
+
+// ── Donut interactivo de gastos personales ──
+function renderFinDonut(allExp){
+  const svg=$("finDonutSvg"); if(!svg) return;
+  const totals={};
+  allExp.forEach(e=>{ totals[e.cat]=(totals[e.cat]||0)+e.amount; });
+  const totalAll=allExp.reduce((a,e)=>a+e.amount,0)||0;
+  const C=2*Math.PI*52;
+  const segs=PRIVATE_CATS.filter(c=>(totals[c.id]||0)>0);
+  let acc=0, circles="";
+  segs.forEach(c=>{
+    const frac=totals[c.id]/totalAll;
+    const len=Math.max(frac*C-2.5,0.6);
+    const dim=selectedFinCat&&selectedFinCat!==c.id;
+    circles+=`<circle cx="65" cy="65" r="52" fill="none" stroke="${c.color}" stroke-width="17"
+      stroke-dasharray="0 ${C}" data-target="${len} ${C-len}" stroke-dashoffset="${-acc}"
+      style="cursor:pointer;transition:stroke-dasharray .75s cubic-bezier(.4,0,.2,1),opacity .3s;opacity:${dim?0.22:1}"
+      onclick="selectFinCat('${c.id}')"><title>${c.label}: ${clp(totals[c.id])}</title></circle>`;
+    acc+=frac*C;
+  });
+  svg.innerHTML=`<circle cx="65" cy="65" r="52" fill="none" stroke="var(--bg3)" stroke-width="17"/>`+circles;
+  // Animación: los arcos crecen desde 0 en cada actualización
+  requestAnimationFrame(()=>requestAnimationFrame(()=>{
+    svg.querySelectorAll("circle[data-target]").forEach(el=>el.setAttribute("stroke-dasharray",el.dataset.target));
+  }));
+  const selCat=PRIVATE_CATS.find(c=>c.id===selectedFinCat);
+  $("finDonutVal").textContent=clp(selCat?(totals[selCat.id]||0):totalAll);
+  $("finDonutLbl").textContent=selCat?selCat.emoji+" "+selCat.label.split(" ")[0]:"Todos";
+  $("finDonutLegend").innerHTML=segs.length?[...segs].sort((a,b)=>totals[b.id]-totals[a.id]).map(c=>`
+    <div class="dleg" style="cursor:pointer;opacity:${selectedFinCat&&selectedFinCat!==c.id?.4:1}" onclick="selectFinCat('${c.id}')">
+      <div class="dleg-dot" style="background:${c.color}"></div>
+      <div class="dleg-name">${c.emoji} ${c.label}</div>
+      <div class="dleg-amt">${clp(totals[c.id])} · ${Math.round(totals[c.id]/totalAll*100)}%</div>
+    </div>`).join(""):`<div style="font-size:12px;color:var(--text3)">Agrega tu primer gasto para ver el gráfico 🍩</div>`;
+}
+
+// ── Chips de categoría en el sheet de agregar gasto ──
+function renderExpSheetCats(){
+  const el=$("expCatChips"); if(!el) return;
+  el.innerHTML=PRIVATE_CATS.map(c=>`
+    <div class="cat-chip ${sheetExpCat===c.id?"sel":""}" id="xcat-${c.id}" onclick="selectSheetCat('${c.id}')">${c.emoji} ${c.label}</div>`).join("");
+}
 function selectSheetCat(id){
   sheetExpCat=id;
   document.querySelectorAll("[id^='xcat-']").forEach(el=>el.classList.remove("sel"));
@@ -628,7 +841,7 @@ ${estadoCuentaText.slice(0,8000)}`;
 
     const res=await fetch("https://api.anthropic.com/v1/messages",{
       method:"POST",
-      headers:{"Content-Type":"application/json","x-api-key":ANTHROPIC_KEY,"anthropic-version":"2023-06-01"},
+      headers:{"Content-Type":"application/json","x-api-key":ANTHROPIC_KEY,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
       body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:3000,messages:[{role:"user",content:prompt}]})
     });
     if(!res.ok) throw new Error("API error "+res.status);
@@ -704,7 +917,7 @@ Responde SOLO en JSON:
 }`;
     const res=await fetch("https://api.anthropic.com/v1/messages",{
       method:"POST",
-      headers:{"Content-Type":"application/json","x-api-key":ANTHROPIC_KEY,"anthropic-version":"2023-06-01"},
+      headers:{"Content-Type":"application/json","x-api-key":ANTHROPIC_KEY,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
       body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:1500,messages:[{role:"user",content:prompt}]})
     });
     if(!res.ok) throw new Error("API "+res.status);
@@ -792,7 +1005,67 @@ function filterInv(cat,el){
   renderInventario();
 }
 
+// ── Lista de compras (auto: por agotarse + manual) ──
+function getShopList(){ return LS.get("shoplist")||[]; }
+
+function renderShopList(){
+  const box=$("shopListBox"); if(!box) return;
+  const manual=getShopList();
+  const manualNames=new Set(manual.map(m=>m.name.toLowerCase()));
+  const auto=lowStockItems().filter(i=>!manualNames.has(i.name.toLowerCase()));
+  if(!manual.length&&!auto.length){
+    box.innerHTML=`<div class="shoplist-empty">Nada pendiente por comprar ✨ — los productos por agotarse aparecerán aquí automáticamente</div>`;
+    return;
+  }
+  box.innerHTML=
+    auto.map(i=>{
+      const d=daysLeft(i);
+      const reason=i.qty===0?"agotado":`~${d} día${d===1?"":"s"}`;
+      return `<div class="shop-row">
+        <span class="shop-auto-tag">auto</span>
+        <div class="shop-name">${i.name}<span class="shop-reason"> · ${reason}</span></div>
+        <button class="btn btn-green btn-sm" onclick="restockItem('${i.id}')">✓ Comprado</button>
+      </div>`;
+    }).join("")+
+    manual.map(m=>`<div class="shop-row">
+        <span class="shop-auto-tag manual">✎</span>
+        <div class="shop-name">${m.name}</div>
+        <button class="btn btn-green btn-sm" onclick="doneShopItem('${m.id}')">✓</button>
+      </div>`).join("");
+}
+
+function addShopItem(){
+  const name=prompt("¿Qué producto agregamos a la lista de compras?");
+  if(!name||!name.trim()) return;
+  const list=getShopList();
+  list.push({id:uid(),name:name.trim()});
+  saveShopList(list);
+  renderShopList();
+  toast("🛒 "+name.trim()+" agregado a la lista");
+}
+
+function doneShopItem(id){
+  saveShopList(getShopList().filter(m=>m.id!==id));
+  renderShopList();
+  toast("✅ Marcado como comprado");
+}
+
+async function restockItem(id){
+  const item=STATE.inventario.find(i=>i.id===id||i.id===String(id));
+  if(!item) return;
+  const v=prompt(`¿Cuántas ${item.unit||"unidades"} de "${item.name}" compraste?`,"1");
+  if(v===null) return;
+  const q=parseFloat(v)||0;
+  if(q<=0) return;
+  item.qty+=q; item.lastUpdate=today();
+  await fsSet(`households/${HOUSEHOLD_ID}/inventario/${id}`,{qty:item.qty,lastUpdate:item.lastUpdate});
+  LS.set("inv",STATE.inventario);
+  renderInventario(); renderDashboard();
+  toast(`📦 ${item.name}: +${q} ${item.unit||"un"}`);
+}
+
 function renderInventario(){
+  renderShopList();
   const list=activeInvFilter==="all"?STATE.inventario:STATE.inventario.filter(i=>i.cat===activeInvFilter);
   const grid=$("invGrid");
   if(!list.length){
@@ -816,7 +1089,10 @@ function renderInventario(){
       </div>
       <span class="inv-status ${st.cls}">${st.label}</span>
       ${d!==null?`<div class="inv-dur" style="color:${st.color}">⏳ ~${d} día${d===1?"":"s"}${runOut?" · "+runOut:""}</div><div class="inv-dur-bar"><div class="inv-dur-fill" style="width:${st.pct}%;background:${st.color}"></div></div>`:""}
-      <button class="btn-del-tiny" onclick="deleteInvItem('${item.id}')" style="margin-top:8px;opacity:.5">🗑️</button>
+      <div style="display:flex;gap:6px;margin-top:8px;align-items:center;justify-content:center">
+        <button class="inv-days-btn" onclick="editInvDays('${item.id}')">⏱ ${item.daysDuration?item.daysDuration+" d/u":"definir días"}</button>
+        <button class="btn-del-tiny" onclick="deleteInvItem('${item.id}')" style="opacity:.5">🗑️</button>
+      </div>
     </div>`;
   }).join("");
   updateBadges();
@@ -852,6 +1128,19 @@ async function changeInvQty(id,delta){
   item.qty=Math.max(0,item.qty+delta); item.lastUpdate=today();
   await fsSet(`households/${HOUSEHOLD_ID}/inventario/${id}`,{qty:item.qty,lastUpdate:item.lastUpdate});
   LS.set("inv",STATE.inventario); renderInventario(); renderDashboard();
+}
+
+async function editInvDays(id){
+  const item=STATE.inventario.find(i=>i.id===id||i.id===String(id));
+  if(!item) return;
+  const v=prompt(`¿Cuántos días dura 1 ${item.unit||"unidad"} de "${item.name}"?\nUsamos esto para predecir el quiebre de stock y alertarte.`, item.daysDuration||suggestDays(item.name)||"");
+  if(v===null) return;
+  const days=parseFloat(v);
+  if(!days||days<=0){ toast("Ingresa un número de días válido","error"); return; }
+  item.daysDuration=days; item.lastUpdate=today();
+  await fsSet(`households/${HOUSEHOLD_ID}/inventario/${id}`,{daysDuration:days,lastUpdate:item.lastUpdate});
+  LS.set("inv",STATE.inventario); renderInventario(); renderDashboard();
+  toast(`⏱ ${item.name}: ${days} días por ${item.unit||"unidad"}`);
 }
 
 async function deleteInvItem(id){
@@ -960,7 +1249,7 @@ async function analyzeImage(b64data,mime){
   try{
     const res=await fetch("https://api.anthropic.com/v1/messages",{
       method:"POST",
-      headers:{"Content-Type":"application/json","x-api-key":ANTHROPIC_KEY,"anthropic-version":"2023-06-01"},
+      headers:{"Content-Type":"application/json","x-api-key":ANTHROPIC_KEY,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
       body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:2000,messages:[{role:"user",content:[
         {type:"image",source:{type:"base64",media_type:apiMime,data:b64}},
         {type:"text",text:"Analiza esta boleta de supermercado chileno. Extrae TODOS los productos. Responde SOLO JSON sin texto extra:\n{\"store\":\"tienda\",\"date\":\"dd/mm/aa\",\"items\":[{\"name\":\"producto\",\"qty\":1,\"unit\":\"un\",\"price\":1990}]}"}
@@ -1045,7 +1334,7 @@ async function addAllToInv(){
       existing.qty+=(it.qty||1); existing.lastUpdate=today();
       await fsSet(`households/${HOUSEHOLD_ID}/inventario/${existing.id}`,{qty:existing.qty,lastUpdate:existing.lastUpdate});
     } else {
-      const newItem={name:it.name,cat:"Abarrotes",qty:it.qty||1,unit:it.unit||"un",brand:"",addedBy:currentUser.uid,addedByName:currentUser.displayName||"",date:today(),lastUpdate:today()};
+      const newItem={name:it.name,cat:"Abarrotes",qty:it.qty||1,unit:it.unit||"un",brand:"",daysDuration:suggestDays(it.name)||null,addedBy:currentUser.uid,addedByName:currentUser.displayName||"",date:today(),lastUpdate:today()};
       const newId=await fsAdd(`households/${HOUSEHOLD_ID}/inventario`,newItem);
       STATE.inventario.push({id:newId,...newItem});
     }
@@ -1214,28 +1503,149 @@ function updateDebtPreview(){
 }
 
 // ══════════════════════════════════════════════════
+//  OFERTAS DE LA SEMANA — supermercados Antofagasta
+// ══════════════════════════════════════════════════
+const SUPERS=[
+  {id:"Líder",       color:"#0071CE"},
+  {id:"Jumbo",       color:"#00A650"},
+  {id:"Santa Isabel",color:"#E30613"},
+  {id:"Unimarc",     color:"#D50032"},
+  {id:"Tottus",      color:"#6BBE45"},
+];
+let ofSuperFilter=null;
+
+function weekKey(){
+  const d=new Date(), jan=new Date(d.getFullYear(),0,1);
+  return d.getFullYear()+"-w"+Math.ceil(((d-jan)/86400000+jan.getDay()+1)/7);
+}
+
+function renderOfertas(){
+  $("ofSupers").innerHTML=
+    `<div class="filter-pill ${ofSuperFilter===null?"on":""}" onclick="filterOfertas(null)">Todos</div>`+
+    SUPERS.map(sp=>`<div class="filter-pill ${ofSuperFilter===sp.id?"on":""}" onclick="filterOfertas('${sp.id}')">
+      <span class="of-dot" style="background:${sp.color}"></span>${sp.id}</div>`).join("");
+  const cache=LS.get("ofertas");
+  const list=$("ofertasList");
+  if(!cache||!cache.data||!cache.data.length){
+    list.innerHTML=`<div class="empty-state"><div class="es-icon">🏷️</div>
+      <div class="es-title">Sin ofertas cargadas</div>
+      <div class="es-sub">La IA buscará en la web las ofertas vigentes de Líder, Jumbo, Santa Isabel, Unimarc y Tottus en Antofagasta</div>
+      <button class="btn btn-accent" style="margin-top:12px" onclick="fetchOfertas(true)">🤖 Buscar ofertas de la semana</button></div>`;
+    $("ofMeta").innerHTML="";
+    return;
+  }
+  const stale=cache.week!==weekKey();
+  $("ofMeta").innerHTML=`Actualizado: ${new Date(cache.ts).toLocaleDateString("es-CL",{day:"numeric",month:"long"})}${stale?' · <span style="color:var(--yellow)">⚠️ semana anterior — toca Actualizar</span>':""}`;
+  const items=ofSuperFilter?cache.data.filter(o=>o.super===ofSuperFilter):cache.data;
+  if(!items.length){ list.innerHTML=`<div class="empty-state"><div class="es-icon">🤷</div><div class="es-title">Sin ofertas de ${ofSuperFilter}</div></div>`; return; }
+  list.innerHTML=items.map(o=>{
+    const sp=SUPERS.find(x=>x.id===o.super)||{color:"#9BA3C2"};
+    return `<div class="of-card">
+      <div class="of-super" style="background:${sp.color}18;color:${sp.color};border:1px solid ${sp.color}44">${o.super}</div>
+      <div class="of-info">
+        <div class="of-name">${o.producto}</div>
+        <div class="of-detail">${o.categoria||""}${o.detalle?" · "+o.detalle:""}</div>
+      </div>
+      <div class="of-right">
+        <div class="of-price">${clp(o.precio)}</div>
+        ${o.precioNormal?`<div class="of-normal">${clp(o.precioNormal)}</div>`:""}
+        ${o.descuento?`<div class="of-disc">-${String(o.descuento).replace("-","").replace("%","")}%</div>`:""}
+        <button class="btn-del-tiny" title="Agregar a lista de compras" onclick="ofertaToShop('${(o.producto||"").replace(/['"]/g,"")}')">🛒＋</button>
+      </div>
+    </div>`;
+  }).join("");
+}
+
+function filterOfertas(id){ ofSuperFilter=id; renderOfertas(); }
+
+function ofertaToShop(name){
+  const list=getShopList();
+  if(list.some(m=>m.name.toLowerCase()===name.toLowerCase())){ toast("Ya está en la lista de compras"); return; }
+  list.push({id:uid(),name});
+  saveShopList(list);
+  toast("🛒 "+name+" agregado a la lista de compras");
+}
+
+async function fetchOfertas(force){
+  const cache=LS.get("ofertas");
+  if(!force&&cache&&cache.week===weekKey()){ renderOfertas(); return; }
+  if(!ANTHROPIC_KEY){ toast("Configura tu clave de API de Anthropic para buscar ofertas","error"); return; }
+  setLoading(true,"Buscando ofertas en supermercados de Antofagasta...");
+  try{
+    const prompt=`Busca en la web las ofertas y promociones VIGENTES ESTA SEMANA en supermercados de Antofagasta, Chile: Líder, Jumbo, Santa Isabel, Unimarc y Tottus. Prioriza alimentos: carnes, lácteos, abarrotes, frutas/verduras, bebidas y productos de limpieza. Incluye solo ofertas con precio concreto en pesos chilenos.
+
+Responde SOLO con JSON válido, sin texto adicional ni markdown:
+{"ofertas":[{"super":"Líder","producto":"Posta rosada al vacío kg","precio":8990,"precioNormal":11990,"descuento":"25%","categoria":"Carnes","detalle":"válido hasta domingo"}]}
+
+Usa exactamente estos nombres de supermercado: Líder, Jumbo, Santa Isabel, Unimarc, Tottus. Entre 10 y 25 ofertas en total. Si de algún supermercado no encuentras nada confiable, omítelo.`;
+    const res=await fetch("https://api.anthropic.com/v1/messages",{
+      method:"POST",
+      headers:{"Content-Type":"application/json","x-api-key":ANTHROPIC_KEY,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
+      body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:4000,
+        messages:[{role:"user",content:prompt}],
+        tools:[{type:"web_search_20250305",name:"web_search",max_uses:6}]})
+    });
+    const data=await res.json();
+    if(data.error) throw new Error(data.error.message||"Error de API");
+    const text=(data.content||[]).map(b=>b.type==="text"?b.text:"").join("");
+    const clean=text.replace(/```json|```/g,"").trim();
+    const jsonStr=clean.slice(clean.indexOf("{"),clean.lastIndexOf("}")+1);
+    const parsed=JSON.parse(jsonStr);
+    const ofertas=(parsed.ofertas||[]).filter(o=>o.producto&&o.precio);
+    if(!ofertas.length) throw new Error("No se encontraron ofertas esta vez, intenta de nuevo");
+    LS.set("ofertas",{ts:Date.now(),week:weekKey(),data:ofertas});
+    ofSuperFilter=null;
+    renderOfertas();
+    toast(`🏷️ ${ofertas.length} ofertas encontradas`);
+  }catch(e){
+    toast("No se pudieron cargar ofertas: "+e.message,"error");
+    renderOfertas();
+  }
+  setLoading(false);
+}
+
+// ══════════════════════════════════════════════════
 //  RECORDATORIOS INTELIGENTES
 // ══════════════════════════════════════════════════
-function checkReminders(){
-  const low=STATE.inventario.filter(i=>{
+function lowStockItems(){
+  return STATE.inventario.filter(i=>{
     const d=daysLeft(i);
     return i.qty===0||(d!==null&&d<=2);
   });
-  if(!low.length) return;
+}
 
-  // Mostrar banner de recordatorio
-  const banner=$("reminderBanner");
-  if(banner&&low.length>0){
-    banner.innerHTML=`<div class="reminder-banner">
-      <span style="font-size:18px">⏰</span>
-      <div>
-        <div style="font-size:13px;font-weight:700;margin-bottom:2px">Productos por agotarse</div>
-        <div style="font-size:12px;color:var(--text2)">${low.slice(0,3).map(i=>i.name).join(", ")}${low.length>3?` y ${low.length-3} más`:""}</div>
+// Banner resumen del Inicio: productos por agotarse + gastos pendientes
+function renderResumenBanner(){
+  const banner=$("reminderBanner"); if(!banner) return;
+  const low=lowStockItems();
+  const pend=STATE.debts.filter(d=>!d.paid);
+  const pendTotal=pend.reduce((a,d)=>a+d.amount,0);
+  if(!low.length&&!pend.length){ banner.innerHTML=""; banner.style.display="none"; return; }
+  let rows="";
+  if(low.length) rows+=`<div class="resumen-row">
+      <span style="font-size:17px">🛒</span>
+      <div style="flex:1;min-width:0">
+        <div class="resumen-t">${low.length} producto${low.length===1?"":"s"} por agotarse</div>
+        <div class="resumen-s">${low.slice(0,3).map(i=>i.name).join(", ")}${low.length>3?` y ${low.length-3} más`:""}</div>
       </div>
       <button class="btn btn-accent btn-sm" onclick="navTo('inventario')">Ver</button>
     </div>`;
-    banner.style.display="block";
-  }
+  if(pend.length) rows+=`<div class="resumen-row">
+      <span style="font-size:17px">💸</span>
+      <div style="flex:1;min-width:0">
+        <div class="resumen-t">${pend.length} gasto${pend.length===1?"":"s"} del hogar pendiente${pend.length===1?"":"s"}</div>
+        <div class="resumen-s">Total por saldar: ${clp(pendTotal)}</div>
+      </div>
+      <button class="btn btn-accent btn-sm" onclick="navTo('deudas')">Ver</button>
+    </div>`;
+  banner.innerHTML=`<div class="reminder-banner" style="flex-direction:column;align-items:stretch;gap:10px">${rows}</div>`;
+  banner.style.display="block";
+}
+
+function checkReminders(){
+  renderResumenBanner();
+  const low=lowStockItems();
+  if(!low.length) return;
 
   // Solicitar permiso para notificaciones push (PWA)
   if("Notification" in window && Notification.permission==="default"){
@@ -1387,6 +1797,7 @@ window.addEventListener("DOMContentLoaded",()=>{
     const el=$(id); if(el){ el.addEventListener("input",updateDebtPreview); el.addEventListener("change",updateDebtPreview); }
   });
   $("expDate")?.setAttribute("value",today());
+  initFirebase();
   checkSession();
 });
 
@@ -1428,15 +1839,18 @@ window.addEventListener("DOMContentLoaded",()=>{
   --safe-b:env(safe-area-inset-bottom,0px); --safe-t:env(safe-area-inset-top,0px);
 }
 [data-theme="light"] {
-  --bg0:#F0F2FA; --bg1:#FFF; --bg2:#F5F6FF; --bg3:#ECEEF8;
-  --sur:#FFF; --sur2:#F0F2FA;
-  --border:rgba(0,0,0,.06); --border2:rgba(0,0,0,.11);
-  --text:#0C0F1A; --text2:#4A5070; --text3:#9BA3C2;
-  --priv:#F0EDF8; --privbr:rgba(107,78,255,.2);
-  --shared:#EDF8F5; --sharedbr:rgba(0,214,143,.3);
-  --accentbg:rgba(107,78,255,.08); --greenbg:rgba(0,214,143,.08);
-  --redbg:rgba(255,107,107,.08); --yellowbg:rgba(255,185,70,.08);
-  --sh:0 2px 16px rgba(0,0,0,.07); --sh-l:0 8px 32px rgba(0,0,0,.1);
+  --bg0:#F6F7FB; --bg1:#FFFFFF; --bg2:#F1F3F9; --bg3:#E9ECF5;
+  --sur:#FFFFFF; --sur2:#F4F5FA;
+  --border:rgba(15,23,42,.07); --border2:rgba(15,23,42,.13);
+  --text:#101425; --text2:#525A78; --text3:#9AA1BD;
+  --accent:#5B54F0; --accent2:#7B6CFF; --accentbg:rgba(91,84,240,.08);
+  --green:#0AB97F; --greenbg:rgba(10,185,127,.09); --greenbr:rgba(10,185,127,.28);
+  --red:#F04E4E; --redbg:rgba(240,78,78,.08); --redbr:rgba(240,78,78,.22);
+  --yellow:#E8960C; --yellowbg:rgba(232,150,12,.1);
+  --blue:#2E86F5; --bluebg:rgba(46,134,245,.09);
+  --priv:#F1EEFB; --privbr:rgba(91,84,240,.22);
+  --shared:#EAF8F2; --sharedbr:rgba(10,185,127,.3);
+  --sh:0 2px 14px rgba(30,36,70,.07); --sh-l:0 10px 34px rgba(30,36,70,.12);
 }
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 html{height:-webkit-fill-available}
@@ -1465,6 +1879,8 @@ img{display:block;max-width:100%}
 .auth-btn:active{transform:scale(.97)}
 .auth-note{font-size:11px;color:var(--text3);text-align:center;margin-top:4px}
 .auth-question{font-size:14px;font-weight:600;color:var(--text2);margin-bottom:16px}
+.remember-row{display:flex;align-items:center;gap:9px;font-size:12.5px;font-weight:600;color:var(--text2);cursor:pointer;padding:2px 4px;user-select:none}
+.remember-row input{width:17px;height:17px;accent-color:var(--accent);cursor:pointer}
 .user-cards{display:flex;gap:14px;margin-bottom:24px;width:100%;max-width:360px}
 .user-card{flex:1;background:var(--sur);border:1.5px solid var(--border2);border-radius:var(--r);padding:20px 12px;display:flex;flex-direction:column;align-items:center;gap:8px;cursor:pointer;transition:all .18s;-webkit-tap-highlight-color:transparent;user-select:none}
 .user-card:active{transform:scale(.96)}
@@ -1477,6 +1893,51 @@ img{display:block;max-width:100%}
 .role-badge.admin{background:rgba(255,185,70,.14);border-color:rgba(255,185,70,.4);color:var(--yellow,#FFB946)}
 .admin-title{font-size:11px;font-weight:800;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin:18px 0 10px;padding-top:14px;border-top:1px solid var(--border)}
 .admin-grid{display:flex;flex-direction:column;gap:8px}
+
+/* ── Donut finanzas ── */
+.fin-donut-card{margin:0 18px 14px;background:var(--sur);border:1px solid var(--border);border-radius:var(--r-l);padding:16px 18px;box-shadow:var(--sh)}
+.fin-donut-card .donut-title{font-size:12px;font-weight:800;color:var(--text3);text-transform:uppercase;letter-spacing:.8px;margin-bottom:12px}
+.cat-chip.all{border-style:dashed}
+
+/* ── Botón días inventario ── */
+.inv-days-btn{background:var(--accentbg);color:var(--accent2);border:1px solid var(--privbr);border-radius:8px;padding:4px 9px;font-size:10px;font-weight:700;cursor:pointer;font-family:"Inter",sans-serif}
+
+/* ── Banner resumen inicio ── */
+.resumen-row{display:flex;align-items:center;gap:10px}
+.resumen-t{font-size:13px;font-weight:700;margin-bottom:1px}
+.resumen-s{font-size:11.5px;color:var(--text2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* ── Lista por comprar ── */
+.shoplist-card{margin:0 18px 16px;background:var(--sur);border:1px solid var(--border);border-radius:var(--r-l);padding:14px 16px;box-shadow:var(--sh)}
+.shoplist-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+.shoplist-title{font-size:14px;font-weight:800}
+.shoplist-sub{font-size:11px;color:var(--text3)}
+.shoplist-empty{font-size:12px;color:var(--text3);padding:6px 0}
+.shop-row{display:flex;align-items:center;gap:9px;padding:8px 0;border-top:1px solid var(--border)}
+.shop-row:first-child{border-top:none}
+.shop-name{flex:1;font-size:13px;font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.shop-reason{font-size:11px;color:var(--yellow);font-weight:600}
+.shop-auto-tag{font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.5px;background:var(--yellowbg);color:var(--yellow);border-radius:6px;padding:2px 6px;flex-shrink:0}
+.shop-auto-tag.manual{background:var(--accentbg);color:var(--accent2)}
+
+/* ── Ofertas ── */
+.of-supers{display:flex;gap:7px;overflow-x:auto;padding:0 18px 12px;-webkit-overflow-scrolling:touch}
+.of-supers::-webkit-scrollbar{display:none}
+.of-dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:5px}
+.of-meta{font-size:11px;color:var(--text3);padding:0 18px 10px}
+.of-card{display:flex;align-items:center;gap:11px;background:var(--sur);border:1px solid var(--border);border-radius:var(--r);padding:12px 14px;margin:0 18px 9px;box-shadow:var(--sh)}
+.of-super{font-size:9.5px;font-weight:800;border-radius:7px;padding:4px 7px;flex-shrink:0;text-transform:uppercase;letter-spacing:.3px}
+.of-info{flex:1;min-width:0}
+.of-name{font-size:13px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.of-detail{font-size:11px;color:var(--text3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.of-right{display:flex;flex-direction:column;align-items:flex-end;gap:1px;flex-shrink:0}
+.of-price{font-size:14px;font-weight:800;color:var(--green)}
+.of-normal{font-size:10.5px;color:var(--text3);text-decoration:line-through}
+.of-disc{font-size:9.5px;font-weight:800;background:var(--redbg);color:var(--red);border-radius:6px;padding:1px 5px}
+.of-links{margin:14px 18px 0;padding:14px 16px;background:var(--bg2);border-radius:var(--r);border:1px solid var(--border)}
+.of-links-title{font-size:11px;font-weight:800;color:var(--text3);text-transform:uppercase;letter-spacing:.8px;margin-bottom:8px}
+.of-links-row{display:flex;flex-wrap:wrap;gap:8px}
+.of-links-row a{font-size:12px;font-weight:700;color:var(--accent2);text-decoration:none;background:var(--sur);border:1px solid var(--border2);border-radius:20px;padding:5px 12px}
 
 /* ── LOADING ── */
 #loadingOverlay{position:fixed;inset:0;z-index:900;background:rgba(8,11,20,.8);backdrop-filter:blur(8px);display:none;flex-direction:column;align-items:center;justify-content:center;gap:12px}
@@ -1783,6 +2244,10 @@ img{display:block;max-width:100%}
   <div class="auth-form" id="loginPwdWrap" style="display:none">
     <input class="auth-input" id="loginPassword" type="password" placeholder="Contraseña"
            autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin()">
+    <label class="remember-row">
+      <input type="checkbox" id="rememberPwd">
+      <span>Guardar contraseña en este dispositivo</span>
+    </label>
     <button class="auth-btn" onclick="doLogin()">Entrar →</button>
     <div class="auth-note">Tus gastos personales son privados — solo tú los ves en tu sesión</div>
   </div>
@@ -1853,7 +2318,18 @@ img{display:block;max-width:100%}
           <div class="sec-action" onclick="openSheet('addExpense')">+ Gasto</div>
         </div>
       </div>
-      <div class="priv-indicator">🔒 Datos privados — aislados por usuario · cifrados en Firebase</div>
+      <div class="priv-indicator">🔒 Datos privados — solo visibles en tu sesión</div>
+
+      <div class="fin-donut-card">
+        <div class="donut-title">Distribución de mis gastos</div>
+        <div class="donut-row">
+          <div class="donut-wrap">
+            <svg id="finDonutSvg" width="130" height="130" viewBox="0 0 130 130" style="transform:rotate(-90deg)"></svg>
+            <div class="donut-center"><div class="donut-center-val" id="finDonutVal">$0</div><div class="donut-center-lbl" id="finDonutLbl">Todos</div></div>
+          </div>
+          <div class="donut-legend" id="finDonutLegend"></div>
+        </div>
+      </div>
 
       <div class="finance-summary">
         <div class="fin-total-label">Gasto total registrado</div>
@@ -1893,12 +2369,12 @@ img{display:block;max-width:100%}
     <!-- ── INVENTARIO ── -->
     <div class="page" id="page-inventario">
       <div class="sec-header">
-        <div><div class="sec-title">Inventario</div><div class="sec-subtitle">Sincronizado en tiempo real</div></div>
+        <div><div class="sec-title">Inventario</div><div class="sec-subtitle">Del hogar · compartido</div></div>
         <div style="display:flex;gap:8px;align-items:center">
           <div class="sec-action" onclick="openSheet('addInv')">+ Agregar</div>
         </div>
       </div>
-      <div class="shared-indicator">🏠 Compartido · sync en tiempo real vía Firebase</div>
+      <div class="shared-indicator" id="invSyncStatus">📴 Solo este dispositivo</div>
       <div class="inv-filter-bar" id="invFilterBar">
         <div class="filter-pill on" onclick="filterInv('all',this)">Todos</div>
         <div class="filter-pill" onclick="filterInv('Lácteos',this)">🥛 Lácteos</div>
@@ -1907,7 +2383,37 @@ img{display:block;max-width:100%}
         <div class="filter-pill" onclick="filterInv('Limpieza',this)">🧴 Limpieza</div>
         <div class="filter-pill" onclick="filterInv('Bebestibles',this)">🥤 Bebestibles</div>
       </div>
+      <div class="shoplist-card">
+        <div class="shoplist-head">
+          <div><div class="shoplist-title">🛒 Por comprar</div><div class="shoplist-sub">Para la próxima compra del hogar</div></div>
+          <button class="btn btn-ghost btn-sm" onclick="addShopItem()">+ Agregar</button>
+        </div>
+        <div id="shopListBox"></div>
+      </div>
+
       <div class="inv-grid" id="invGrid"></div>
+    </div>
+
+    <!-- ── OFERTAS DE LA SEMANA ── -->
+    <div class="page" id="page-ofertas">
+      <div class="sec-header">
+        <div><div class="sec-title">Ofertas de la semana</div><div class="sec-subtitle">Supermercados de Antofagasta</div></div>
+        <div class="sec-action" onclick="fetchOfertas(true)">🔄 Actualizar</div>
+      </div>
+      <div class="of-supers" id="ofSupers"></div>
+      <div id="ofMeta" class="of-meta"></div>
+      <div id="ofertasList"></div>
+      <div class="of-links">
+        <div class="of-links-title">Catálogos oficiales</div>
+        <div class="of-links-row">
+          <a href="https://www.lider.cl" target="_blank" rel="noopener">Líder</a>
+          <a href="https://www.jumbo.cl" target="_blank" rel="noopener">Jumbo</a>
+          <a href="https://www.santaisabel.cl" target="_blank" rel="noopener">Santa Isabel</a>
+          <a href="https://www.unimarc.cl" target="_blank" rel="noopener">Unimarc</a>
+          <a href="https://www.tottus.cl" target="_blank" rel="noopener">Tottus</a>
+        </div>
+      </div>
+      <div style="height:18px"></div>
     </div>
 
     <!-- ── DEUDAS ── -->
@@ -1980,6 +2486,9 @@ img{display:block;max-width:100%}
     </div>
     <div class="tab-item" id="tab-boleta" onclick="navTo('boleta')">
       <div class="tab-icon">📄</div><div class="tab-label">Boleta</div><div class="tab-active-bar"></div>
+    </div>
+    <div class="tab-item" id="tab-ofertas" onclick="navTo('ofertas')">
+      <div class="tab-icon">🏷️</div><div class="tab-label">Ofertas</div><div class="tab-active-bar"></div>
     </div>
   </div>
 </div>
@@ -2114,6 +2623,7 @@ img{display:block;max-width:100%}
     </div>
 
     <button class="btn btn-ghost btn-full" style="margin-bottom:8px" onclick="changeOwnPassword()">🔑 Cambiar mi contraseña</button>
+    <button class="btn btn-ghost btn-full" style="margin-bottom:8px" onclick="forgetSavedPassword()">🔒 Olvidar contraseña guardada en este dispositivo</button>
 
     <div id="adminPanel" style="display:none">
       <div class="admin-title">Panel de administración</div>
