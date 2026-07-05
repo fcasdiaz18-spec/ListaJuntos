@@ -141,6 +141,38 @@ const LS = {
 };
 const $ = id => document.getElementById(id);
 const clp = n => "$"+(Math.round(n)||0).toLocaleString("es-CL");
+
+// Extrae JSON de la respuesta de la IA, reparándolo si vino cortado por longitud
+function parseAIJson(text){
+  let t=String(text||"").replace(/```json|```/g,"").trim();
+  const start=t.indexOf("{");
+  if(start<0) throw new Error("La IA no devolvió datos. Intenta de nuevo.");
+  t=t.slice(start);
+  // 1) intento directo
+  try{ return JSON.parse(t); }catch(e){}
+  // 2) recortar hasta la última llave de cierre
+  const lastBrace=t.lastIndexOf("}");
+  if(lastBrace>0){ try{ return JSON.parse(t.slice(0,lastBrace+1)); }catch(e){} }
+  // 3) reparar JSON truncado: cerrar strings/arrays/objetos abiertos
+  let out="",inStr=false,esc=false; const stack=[];
+  for(const ch of t){
+    if(esc){ out+=ch; esc=false; continue; }
+    if(ch==="\\"){ out+=ch; esc=true; continue; }
+    if(ch==='"'){ inStr=!inStr; out+=ch; continue; }
+    if(!inStr){
+      if(ch==="{"||ch==="[") stack.push(ch);
+      else if(ch==="}"||ch==="]") stack.pop();
+    }
+    out+=ch;
+  }
+  if(inStr) out+='"';
+  // quitar coma colgante final
+  out=out.replace(/,\s*$/,"");
+  while(stack.length){ const o=stack.pop(); out+= o==="{" ? "}" : "]"; }
+  // limpiar comas antes de cierres
+  out=out.replace(/,(\s*[}\]])/g,"$1");
+  return JSON.parse(out);
+}
 // Parsear montos escritos con puntos de miles ("45.000" → 45000)
 const parseCLP = v => parseInt(String(v||"").replace(/\D/g,""))||0;
 // Auto-formato de miles mientras se escribe
@@ -235,6 +267,7 @@ async function startSession(uid_) {
   };
   loadLocalData();
   if (syncOn) initSync();
+  requestNotifPermission();
   setLoading(false);
   showApp();
 }
@@ -340,6 +373,52 @@ function initSync() {
     LS.set("shoplist", snap.data().items || []);
     if (activePage === "inventario") renderShopList();
   }, e => console.warn("sync shoplist:", e.message)));
+
+  // Eventos para notificaciones cruzadas (Felipe ↔ Meli)
+  // Ignoramos eventos previos a la conexión y los propios.
+  const sessionStart = Date.now();
+  unsubListeners.push(db.collection(base + "/events")
+    .where("ts", ">", sessionStart)
+    .onSnapshot(snap => {
+      snap.docChanges().forEach(ch => {
+        if (ch.type !== "added") return;
+        const ev = ch.doc.data();
+        if (!ev || ev.fromUid === currentUser.uid) return; // no notificarme lo mío
+        showLocalNotification(ev.title || "ListaJuntos", ev.body || "");
+      });
+    }, e => console.warn("sync events:", e.message)));
+}
+
+// Enviar un evento al otro integrante (y mostrar confirmación local)
+async function notifyPartner(kind, body) {
+  const titles = { deuda: "💸 Nueva deuda del hogar", inv: "📦 Inventario actualizado", shop: "🛒 Lista de compras" };
+  const title = titles[kind] || "ListaJuntos";
+  if (db && syncOn) {
+    try {
+      await db.collection(`households/${HOUSEHOLD_ID}/events`).add({
+        kind, title, body, fromUid: currentUser.uid,
+        fromName: currentUser.displayName || "", ts: Date.now(),
+        createdAt: firebase.firestore.FieldValue.serverTimestamp()
+      });
+    } catch (e) { console.warn("notifyPartner:", e.message); }
+  }
+}
+
+// Mostrar notificación del sistema (si hay permiso) o toast como respaldo
+function showLocalNotification(title, body) {
+  if ("Notification" in window && Notification.permission === "granted") {
+    try {
+      new Notification(title, { body, icon: "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏠</text></svg>" });
+      return;
+    } catch (e) {}
+  }
+  toast(title + " · " + body);
+}
+
+// Pedir permiso de notificaciones al iniciar sesión
+function requestNotifPermission() {
+  if (!("Notification" in window)) return;
+  if (Notification.permission === "default") { Notification.requestPermission().catch(() => {}); }
 }
 
 // Guardar lista de compras (local + nube si hay sync)
@@ -475,10 +554,16 @@ function navTo(id) {
   if(privPages.includes(id)) { pill.textContent="🔒 Personal"; pill.className="ctx-pill priv"; }
   else if(id==="dashboard") { pill.textContent="⊞ Inicio"; pill.className="ctx-pill"; }
   else if(id==="ofertas") { pill.textContent="🏷️ Semana"; pill.className="ctx-pill shared"; }
+  else if(id==="boleta") { pill.textContent="📷 Scaner"; pill.className="ctx-pill shared"; }
   else { pill.textContent="👥 Compartido"; pill.className="ctx-pill shared"; }
   // Lazy renders
   const renders = {finanzas:renderFinanzas,inventario:renderInventario,deudas:renderDeudas,ofertas:renderOfertas};
   if(renders[id]) renders[id]();
+  // Auto-cargar ofertas de la semana si hay clave y el cache es viejo
+  if(id==="ofertas" && anthKey()){
+    const c=LS.get("ofertas");
+    if(!c || c.week!==weekKey()) fetchOfertas(false);
+  }
 }
 
 // ══════════════════════════════════════════════════
@@ -549,9 +634,42 @@ function loadHeroImg(e) {
 // ══════════════════════════════════════════════════
 const CAT_COLORS = ["#6B4EFF","#00D68F","#FF6B6B","#FFB946","#4E9FFF","#FF6B9A","#A78BFA"];
 
+// ── Indicadores económicos Chile (USD, UF, UTM) ──
+async function loadIndicators(force){
+  const bar=$("indicatorsBar"); if(!bar) return;
+  const cached=LS.get("indicators");
+  const fresh=cached && (Date.now()-cached.ts < 3*3600*1000); // 3 h
+  if(cached && !force) renderIndicators(cached);
+  if(fresh && !force) return;
+  try{
+    const res=await fetch("https://mindicador.cl/api");
+    if(!res.ok) throw new Error("no disponible");
+    const data=await res.json();
+    const ind={ ts:Date.now(),
+      dolar:data.dolar?.valor, uf:data.uf?.valor, utm:data.utm?.valor,
+      euro:data.euro?.valor, fecha:data.dolar?.fecha };
+    LS.set("indicators",ind);
+    renderIndicators(ind);
+  }catch(e){
+    if(cached) renderIndicators(cached);
+    else bar.innerHTML=`<div class="ind-loading">💱 Indicadores no disponibles — toca para reintentar</div>`;
+  }
+}
+
+function renderIndicators(ind){
+  const bar=$("indicatorsBar"); if(!bar) return;
+  const item=(emoji,label,val,dec=0)=>`<div class="ind-item"><span class="ind-emoji">${emoji}</span><div><div class="ind-label">${label}</div><div class="ind-val">${val?"$"+Math.round(val).toLocaleString("es-CL"):"—"}</div></div></div>`;
+  bar.innerHTML=
+    item("💵","Dólar",ind.dolar)+
+    item("📊","UF",ind.uf)+
+    item("💶","Euro",ind.euro)+
+    item("🧾","UTM",ind.utm);
+}
+
 function renderDashboard() {
   if(!currentUser) return;
   renderResumenBanner();
+  loadIndicators();
   const uid_ = currentUser.uid;
   const name_ = currentUser.displayName || currentUser.email.split("@")[0];
   const now = new Date();
@@ -646,14 +764,32 @@ function renderDashboard() {
 // ══════════════════════════════════════════════════
 // Ordenadas por tipo: primero deudas/créditos, luego gastos corrientes
 const PRIVATE_CATS = [
+  // Deudas y créditos
   {id:"credito_hip",  label:"Crédito Hipotecario", emoji:"🏠",color:"#6B4EFF", grupo:"deuda"},
   {id:"credito_con",  label:"Crédito Consumo",     emoji:"💳",color:"#4E9FFF", grupo:"deuda"},
+  {id:"credito_auto", label:"Crédito Automotriz",  emoji:"🚙",color:"#5B8DEF", grupo:"deuda"},
+  {id:"tarjeta",      label:"Tarjeta de Crédito",  emoji:"💳",color:"#7C6CFF", grupo:"deuda"},
   {id:"deuda_pers",   label:"Deuda Personal",       emoji:"👤",color:"#FF6B9A", grupo:"deuda"},
+  // Gastos corrientes
   {id:"supermercado", label:"Supermercado",          emoji:"🛒",color:"#34D399", grupo:"gasto"},
+  {id:"feria",        label:"Feria / Verdulería",   emoji:"🥬",color:"#22C55E", grupo:"gasto"},
+  {id:"comida",       label:"Restaurant / Delivery",emoji:"🍽️",color:"#FB923C", grupo:"gasto"},
   {id:"bencina",      label:"Bencina",              emoji:"⛽",color:"#FFB946", grupo:"gasto"},
-  {id:"salud",        label:"Salud",                emoji:"🏥",color:"#FF6B6B", grupo:"gasto"},
+  {id:"transporte",   label:"Transporte / Auto",    emoji:"🚗",color:"#60A5FA", grupo:"gasto"},
+  {id:"cuentas",      label:"Cuentas (luz/agua/gas)",emoji:"💡",color:"#FACC15", grupo:"gasto"},
+  {id:"internet",     label:"Internet / Celular",   emoji:"📶",color:"#38BDF8", grupo:"gasto"},
+  {id:"arriendo",     label:"Arriendo / GC",        emoji:"🏢",color:"#818CF8", grupo:"gasto"},
+  {id:"salud",        label:"Salud / Farmacia",     emoji:"🏥",color:"#FF6B6B", grupo:"gasto"},
   {id:"gym",          label:"Gym / Deporte",        emoji:"🏋️",color:"#00D68F", grupo:"gasto"},
   {id:"suscripciones",label:"Suscripciones",        emoji:"📱",color:"#A78BFA", grupo:"gasto"},
+  {id:"ropa",         label:"Ropa / Vestuario",     emoji:"👕",color:"#F472B6", grupo:"gasto"},
+  {id:"hogar",        label:"Hogar / Ferretería",   emoji:"🔨",color:"#A3A3A3", grupo:"gasto"},
+  {id:"mascotas",     label:"Mascotas",             emoji:"🐾",color:"#C084FC", grupo:"gasto"},
+  {id:"educacion",    label:"Educación",            emoji:"📚",color:"#2DD4BF", grupo:"gasto"},
+  {id:"entretencion", label:"Entretención / Ocio",  emoji:"🎬",color:"#F87171", grupo:"gasto"},
+  {id:"belleza",      label:"Belleza / Cuidado",    emoji:"💇",color:"#FB7185", grupo:"gasto"},
+  {id:"regalos",      label:"Regalos / Eventos",    emoji:"🎁",color:"#E879F9", grupo:"gasto"},
+  {id:"ahorro",       label:"Ahorro / Inversión",   emoji:"🐷",color:"#10B981", grupo:"gasto"},
   {id:"otros",        label:"Otros",                emoji:"📦",color:"#9BA3C2", grupo:"gasto"},
 ];
 
@@ -675,8 +811,12 @@ function renderFinanzas() {
 
   renderFinDonut(allExp);
   renderProjection(allExp);
+  renderTrend(allExp);
+  renderBudget(allExp);
 
-  const filtered = selectedFinCat ? allExp.filter(e=>e.cat===selectedFinCat) : allExp;
+  const searchTerm=($("expSearch")?.value||"").trim().toLowerCase();
+  let filtered = selectedFinCat ? allExp.filter(e=>e.cat===selectedFinCat) : allExp;
+  if(searchTerm) filtered=filtered.filter(e=>(e.desc||"").toLowerCase().includes(searchTerm));
   const total    = filtered.reduce((a,e)=>a+e.amount,0);
 
   $("finTotalVal").textContent = Math.round(total).toLocaleString("es-CL");
@@ -703,16 +843,21 @@ function renderFinanzas() {
   }
   list.innerHTML=[...filtered].slice(0,50).map(e=>{
     const cat=PRIVATE_CATS.find(c=>c.id===e.cat)||{emoji:"📦",label:"Otro",color:"#9BA3C2"};
+    const serie=e.groupId?STATE.expenses[uid_].filter(x=>x.groupId===e.groupId).length:0;
     return `<div class="expense-item">
       <div class="exp-icon" style="background:${cat.color}22;color:${cat.color}">${cat.emoji}</div>
       <div class="exp-info">
         <div class="exp-name">${e.desc}</div>
-        <div class="exp-cat">${cat.label}${e.aiGenerated?" · 🤖 IA":""}</div>
+        <div class="exp-cat">${cat.label}${e.aiGenerated?" · 🤖 IA":""}${serie?` · 🔁 x${serie}`:""}</div>
       </div>
       <div class="exp-right">
         <div class="exp-amount">-${clp(e.amount)}</div>
         <div class="exp-date">${e.date}</div>
-        <button class="btn-del-tiny" onclick="deleteExpense('${e.id}')">🗑️</button>
+        <div style="display:flex;gap:4px;margin-top:3px">
+          <button class="btn-del-tiny" onclick="openEditExpense('${e.id}')" title="Editar">✏️</button>
+          <button class="btn-del-tiny" onclick="deleteExpense('${e.id}')" title="Eliminar">🗑️</button>
+          ${serie?`<button class="btn-del-tiny" onclick="deleteExpenseSeries('${e.groupId}')" title="Borrar serie">🔁🗑️</button>`:""}
+        </div>
       </div>
     </div>`;
   }).join("");
@@ -742,6 +887,157 @@ function daysToPayday(){
   let pay=new Date(y,m,Math.min(30,lastDay));
   if(now.getDate()>Math.min(30,lastDay)){ const l2=new Date(y,m+2,0).getDate(); pay=new Date(y,m+1,Math.min(30,l2)); }
   return Math.max(0,Math.ceil((pay-now)/86400000));
+}
+
+// ── Historial y tendencias: gasto por mes (últimos 6 meses) ──
+function monthlyTotals(allExp, n){
+  const now=new Date();
+  const arr=[];
+  for(let i=n-1;i>=0;i--){
+    const d=new Date(now.getFullYear(),now.getMonth()-i,1);
+    const key=d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0");
+    const total=allExp.filter(e=>(e.date||"").startsWith(key)).reduce((a,e)=>a+e.amount,0);
+    arr.push({key,y:d.getFullYear(),m:d.getMonth(),total});
+  }
+  return arr;
+}
+
+function renderTrend(allExp){
+  const card=$("trendCard"); if(!card) return;
+  const data=monthlyTotals(allExp,6);
+  const hasData=data.some(d=>d.total>0);
+  if(!hasData){ card.innerHTML=""; return; }
+  const maxV=Math.max(...data.map(d=>d.total),1);
+  const cur=data[data.length-1].total, prev=data[data.length-2]?.total||0;
+  const diff=prev?Math.round((cur-prev)/prev*100):0;
+  const trendTxt=prev===0?"":diff>0?`▲ ${diff}% vs mes anterior`:diff<0?`▼ ${Math.abs(diff)}% vs mes anterior`:"= igual que el mes anterior";
+  const trendCol=diff>0?"var(--red)":diff<0?"var(--green)":"var(--text3)";
+  const bars=data.map(d=>{
+    const h=Math.round(d.total/maxV*100);
+    const isCur=d===data[data.length-1];
+    return `<div class="tbar-col">
+      <div class="tbar-val">${d.total?clp(d.total).replace("$",""):""}</div>
+      <div class="tbar-track"><div class="tbar-fill" style="height:${d.total?Math.max(h,3):0}%;background:${isCur?"var(--accent)":"var(--accent2)"};opacity:${isCur?1:.55}"></div></div>
+      <div class="tbar-lbl ${isCur?"cur":""}">${MESES[d.m].slice(0,3)}</div>
+    </div>`;
+  }).join("");
+  const avg=Math.round(data.reduce((a,d)=>a+d.total,0)/data.filter(d=>d.total>0).length||0);
+  card.innerHTML=`
+    <div class="trend-head">
+      <div class="trend-title">📉 Tendencia de gastos</div>
+      ${trendTxt?`<div class="trend-diff" style="color:${trendCol}">${trendTxt}</div>`:""}
+    </div>
+    <div class="tbar-chart">${bars}</div>
+    <div class="trend-note">Promedio mensual: <strong>${clp(avg)}</strong></div>`;
+}
+
+// ── Presupuesto por categoría ──
+function getBudgets(){ try{ return JSON.parse(localStorage.getItem("lj6_budget_"+currentUser.uid)||"{}"); }catch(e){ return {}; } }
+function saveBudgets(b){ localStorage.setItem("lj6_budget_"+currentUser.uid, JSON.stringify(b)); }
+
+function setBudget(catId){
+  const b=getBudgets();
+  const cat=PRIVATE_CATS.find(c=>c.id===catId);
+  const v=prompt(`Presupuesto mensual para ${cat.emoji} ${cat.label} (CLP):\nDeja vacío o 0 para quitarlo.`, b[catId]?b[catId].toLocaleString("es-CL"):"");
+  if(v===null) return;
+  const n=parseCLP(v);
+  if(n>0) b[catId]=n; else delete b[catId];
+  saveBudgets(b);
+  renderFinanzas();
+  toast(n>0?`🎯 Presupuesto ${cat.label}: ${clp(n)}`:"Presupuesto quitado");
+}
+
+function renderBudget(allExp){
+  const card=$("budgetCard"); if(!card) return;
+  const b=getBudgets();
+  const mes=today().slice(0,7);
+  const gastadoPorCat={};
+  allExp.filter(e=>(e.date||"").startsWith(mes)).forEach(e=>{ gastadoPorCat[e.cat]=(gastadoPorCat[e.cat]||0)+e.amount; });
+  const keys=Object.keys(b);
+  const rows=keys.map(id=>{
+    const cat=PRIVATE_CATS.find(c=>c.id===id); if(!cat) return "";
+    const gastado=gastadoPorCat[id]||0, limite=b[id];
+    const pct=Math.min(100,Math.round(gastado/limite*100));
+    const over=gastado>limite;
+    const col=over?"var(--red)":pct>80?"var(--yellow)":"var(--green)";
+    return `<div class="budget-row" onclick="setBudget('${id}')">
+      <div class="budget-top"><span>${cat.emoji} ${cat.label}</span><span style="color:${col};font-weight:800">${clp(gastado)} / ${clp(limite)}</span></div>
+      <div class="budget-bar"><div class="budget-fill" style="width:${pct}%;background:${col}"></div></div>
+      ${over?`<div class="budget-over">⚠️ Excedido por ${clp(gastado-limite)}</div>`:pct>80?`<div class="budget-over" style="color:var(--yellow)">Te queda ${clp(limite-gastado)}</div>`:""}
+    </div>`;
+  }).join("");
+  // Chips para agregar presupuesto a categorías sin uno
+  const sinPres=PRIVATE_CATS.filter(c=>c.grupo==="gasto"&&!b[c.id]);
+  card.innerHTML=`
+    <div class="budget-head">
+      <div class="budget-title">🎯 Presupuesto mensual</div>
+    </div>
+    ${rows||'<div class="budget-empty">Define límites por categoría para controlar tus gastos del mes</div>'}
+    <div class="budget-add-chips">
+      ${sinPres.slice(0,8).map(c=>`<div class="budget-add-chip" onclick="setBudget('${c.id}')">+ ${c.emoji} ${c.label.split(" ")[0]}</div>`).join("")}
+    </div>`;
+}
+
+// ── Exportar gastos a CSV ──
+function exportExpensesCSV(){
+  const uid_=currentUser.uid;
+  const exp=STATE.expenses[uid_]||[];
+  if(!exp.length){ toast("No hay gastos para exportar","error"); return; }
+  const rows=[["Fecha","Descripción","Categoría","Monto CLP","Origen"]];
+  [...exp].sort((a,b)=>(b.date||"").localeCompare(a.date||"")).forEach(e=>{
+    const cat=PRIVATE_CATS.find(c=>c.id===e.cat)?.label||e.cat;
+    rows.push([e.date||"", (e.desc||"").replace(/"/g,'""'), cat, e.amount, e.aiGenerated?"IA":"Manual"]);
+  });
+  const csv="\ufeff"+rows.map(r=>r.map(c=>`"${c}"`).join(";")).join("\n"); // BOM + ; para Excel Chile
+  const blob=new Blob([csv],{type:"text/csv;charset=utf-8"});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement("a");
+  a.href=url; a.download=`gastos_${currentUser.displayName||"usuario"}_${today()}.csv`;
+  a.click(); URL.revokeObjectURL(url);
+  toast("📤 CSV exportado: "+exp.length+" gastos");
+}
+
+// ── Resumen mensual con IA ──
+async function runMonthSummary(){
+  if(!anthKey()){ toast("Configura la IA: toca tu avatar → 🤖 Configurar IA","error"); return; }
+  const uid_=currentUser.uid;
+  const mes=today().slice(0,7);
+  const exp=(STATE.expenses[uid_]||[]).filter(e=>(e.date||"").startsWith(mes));
+  if(exp.length<2){ toast("Necesitas al menos 2 gastos este mes","error"); return; }
+  setLoading(true,"🤖 Generando resumen del mes...");
+  try{
+    const income=getIncome();
+    const prompt=`Eres asesor financiero personal en Chile. Genera un resumen breve y motivador del mes para ${currentUser.displayName||"el usuario"}.
+${income?`Ingreso mensual: ${income} CLP.`:""}
+Gastos del mes (${mes}):
+${JSON.stringify(exp.map(e=>({d:e.desc,m:e.amount,c:e.cat})).slice(0,80))}
+Categorías: ${PRIVATE_CATS.map(c=>c.id+":"+c.label).join(", ")}
+
+Responde SOLO JSON compacto:
+{"titular":"frase resumen del mes","totalGastado":0,"categoriaTop":"label","insights":["obs 1","obs 2","obs 3"],"consejo":"un consejo accionable para el próximo mes"}`;
+    const res=await fetch("https://api.anthropic.com/v1/messages",{
+      method:"POST",
+      headers:{"Content-Type":"application/json","x-api-key":anthKey(),"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
+      body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:1200,messages:[{role:"user",content:prompt}]})
+    });
+    if(!res.ok) throw new Error("API "+res.status);
+    const data=await res.json();
+    const p=parseAIJson(data.content?.[0]?.text||"");
+    setLoading(false);
+    $("insightsPanel").innerHTML=`
+      <div class="results-block" style="border-color:var(--accent)">
+        <div class="rb-title">📅 Resumen de ${MESES[new Date().getMonth()]}</div>
+        <div style="font-size:14px;font-weight:700;margin:4px 0 10px">${p.titular||""}</div>
+        <div class="rb-row"><span>Total gastado</span><span class="neg">${clp(p.totalGastado||exp.reduce((a,e)=>a+e.amount,0))}</span></div>
+        <div class="rb-row"><span>Categoría top</span><span>${p.categoriaTop||"—"}</span></div>
+        ${(p.insights||[]).map(i=>`<div class="insight-row">📊 ${i}</div>`).join("")}
+        ${p.consejo?`<div class="rec-row" style="margin-top:8px">💡 ${p.consejo}</div>`:""}
+      </div>`;
+    toast("📅 Resumen del mes listo");
+  }catch(e){
+    setLoading(false);
+    toast("No se pudo generar: "+e.message,"error");
+  }
 }
 
 function renderProjection(allExp){
@@ -831,25 +1127,74 @@ function selectSheetCat(id){
   const el=$("xcat-"+id); if(el) el.classList.add("sel");
 }
 
+let editingExpId=null;
+
+function openAddExpense(){
+  editingExpId=null;
+  $("expSheetTitle").textContent="Registrar gasto personal";
+  $("expSubmitBtn").textContent="Registrar gasto";
+  $("expDesc").value=""; $("expAmount").value=""; $("expDate").value=today();
+  $("expRepeat").value="1"; $("expRepeatWrap").style.display="block";
+  sheetExpCat=null; renderExpSheetCats();
+  openSheet("addExpense");
+}
+
+function openEditExpense(eid){
+  const uid_=currentUser.uid;
+  const e=(STATE.expenses[uid_]||[]).find(x=>x.id===eid);
+  if(!e) return;
+  editingExpId=eid;
+  $("expSheetTitle").textContent="Editar gasto";
+  $("expSubmitBtn").textContent="Guardar cambios";
+  $("expDesc").value=e.desc; $("expAmount").value=e.amount.toLocaleString("es-CL");
+  $("expDate").value=e.date; $("expRepeatWrap").style.display="none";
+  sheetExpCat=e.cat; renderExpSheetCats();
+  openSheet("addExpense");
+}
+
 async function addExpense() {
   const desc   = $("expDesc").value.trim();
   const amount = parseCLP($("expAmount").value);
   const date   = $("expDate").value||today();
   if(!desc||!amount){ toast("Completa descripción y monto","error"); return; }
   const uid_ = currentUser.uid;
-  const newExp = {desc, amount, cat:sheetExpCat||"otros", date, addedBy:uid_, aiGenerated:false};
-
-  // Guardar en Firestore
-  const newId = await fsAdd(`users/${uid_}/expenses`, newExp);
-  // Actualizar local
   if(!STATE.expenses[uid_]) STATE.expenses[uid_]=[];
-  STATE.expenses[uid_].unshift({id:newId,...newExp});
-  LS.set("exp_"+(currentUser.displayName||"user"), STATE.expenses[uid_]);
 
+  // Modo edición
+  if(editingExpId){
+    const e=STATE.expenses[uid_].find(x=>x.id===editingExpId);
+    if(e){
+      e.desc=desc; e.amount=amount; e.cat=sheetExpCat||"otros"; e.date=date;
+      await fsSet(`users/${uid_}/expenses/${editingExpId}`,{desc,amount,cat:e.cat,date});
+      LS.set("exp_"+(currentUser.displayName||"user"), STATE.expenses[uid_]);
+    }
+    editingExpId=null;
+    closeSheet("addExpense");
+    renderFinanzas(); renderDashboard();
+    toast("✅ Gasto actualizado");
+    return;
+  }
+
+  // Modo creación (con recurrencia opcional)
+  const repeat=parseInt($("expRepeat").value)||1;
+  const groupId=repeat>1?uid():null;
+  const [by,bm,bd]=date.split("-").map(Number);
+  setLoading(repeat>1,`Creando ${repeat} meses...`);
+  for(let i=0;i<repeat;i++){
+    const dt=new Date(by,bm-1+i,bd);
+    const dateStr=`${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,"0")}-${String(dt.getDate()).padStart(2,"0")}`;
+    const label=repeat>1?`${desc} (${i+1}/${repeat})`:desc;
+    const newExp={desc:label, amount, cat:sheetExpCat||"otros", date:dateStr, addedBy:uid_, aiGenerated:false};
+    if(groupId) newExp.groupId=groupId;
+    const newId=await fsAdd(`users/${uid_}/expenses`, newExp);
+    STATE.expenses[uid_].unshift({id:newId,...newExp});
+  }
+  LS.set("exp_"+(currentUser.displayName||"user"), STATE.expenses[uid_]);
+  if(repeat>1) setLoading(false);
   closeSheet("addExpense");
   $("expDesc").value=""; $("expAmount").value=""; sheetExpCat=null;
   renderFinanzas(); renderDashboard();
-  toast("💳 Gasto registrado: "+clp(amount));
+  toast(repeat>1?`💳 ${repeat} gastos mensuales creados`:"💳 Gasto registrado: "+clp(amount));
 }
 
 async function deleteExpense(eid) {
@@ -860,6 +1205,21 @@ async function deleteExpense(eid) {
   LS.set("exp_"+(currentUser.displayName||"user"), STATE.expenses[uid_]);
   renderFinanzas(); renderDashboard();
   toast("🗑️ Gasto eliminado");
+}
+
+async function deleteExpenseSeries(groupId){
+  const uid_=currentUser.uid;
+  const serie=(STATE.expenses[uid_]||[]).filter(e=>e.groupId===groupId);
+  if(!serie.length) return;
+  const total=serie.reduce((a,e)=>a+e.amount,0);
+  if(!confirm(`¿Eliminar la serie completa?\n${serie.length} gastos · ${clp(total)} en total\n\nNo se puede deshacer.`)) return;
+  setLoading(true,`Eliminando ${serie.length} gastos...`);
+  for(const e of serie){ await fsDel(`users/${uid_}/expenses/${e.id}`); }
+  STATE.expenses[uid_]=STATE.expenses[uid_].filter(e=>e.groupId!==groupId);
+  LS.set("exp_"+(currentUser.displayName||"user"), STATE.expenses[uid_]);
+  setLoading(false);
+  renderFinanzas(); renderDashboard();
+  toast(`🗑️ Serie eliminada (${serie.length} gastos)`);
 }
 
 // ── ESTADO DE CUENTA — análisis IA ──
@@ -939,7 +1299,7 @@ async function analyzeEstadoCuenta() {
     const prompt=`Eres un asistente financiero personal para Chile. El usuario ${name_} te comparte su estado de cuenta bancario o de tarjeta de crédito${estadoImages.length?" como imágenes (fotos/capturas)":""}. La fecha de hoy es ${hoy}.
 
 Analiza y:
-1. Extrae TODAS las transacciones (monto en pesos chilenos, descripción, fecha, tipo: cargo/abono)
+1. Extrae las transacciones más relevantes (máximo 40; monto en pesos chilenos, descripción breve, fecha, tipo: cargo/abono). Descripciones cortas para no exceder el espacio.
 2. Clasifica cada una en: ${PRIVATE_CATS.map(c=>c.label).join(", ")}
 3. Calcula el total gastado por categoría
 4. ESTIMA EL PAGO DE TARJETA DE CRÉDITO a fin de mes: identifica el cupo facturado/monto facturado del período, el pago mínimo y el pago total facturado si aparecen. Si es una tarjeta con cuotas, considera solo la cuota del mes. Si no hay un total explícito, suma los cargos del período como estimación y acláralo.
@@ -965,13 +1325,12 @@ ${estadoCuentaText.trim()?"ESTADO DE CUENTA (texto):\n"+estadoCuentaText.slice(0
     const res=await fetch("https://api.anthropic.com/v1/messages",{
       method:"POST",
       headers:{"Content-Type":"application/json","x-api-key":anthKey(),"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
-      body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:3500,messages:[{role:"user",content}]})
+      body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:6000,messages:[{role:"user",content}]})
     });
     if(!res.ok){ const et=await res.text().catch(()=>""); throw new Error("API "+res.status+(res.status===401?" — revisa tu clave de IA":res.status===400&&/image/i.test(et)?" — imagen no válida":"")); }
     const data=await res.json();
-    const raw=(data.content||[]).map(b=>b.type==="text"?b.text:"").join("").replace(/```json|```/g,"").trim();
-    const jsonStr=raw.slice(raw.indexOf("{"),raw.lastIndexOf("}")+1);
-    const parsed=JSON.parse(jsonStr);
+    const raw=(data.content||[]).map(b=>b.type==="text"?b.text:"").join("");
+    const parsed=parseAIJson(raw);
 
     setLoading(false);
     showEstadoResults(parsed);
@@ -1063,7 +1422,7 @@ Responde SOLO en JSON:
     });
     if(!res.ok) throw new Error("API "+res.status);
     const data=await res.json();
-    const parsed=JSON.parse((data.content?.[0]?.text||"").replace(/```json|```/g,"").trim());
+    const parsed=parseAIJson(data.content?.[0]?.text||"");
     STATE.insights=parsed;
     LS.set("insights_"+uid_,parsed);
     setLoading(false);
@@ -1111,17 +1470,46 @@ const IMGS={
   default:"https://images.unsplash.com/photo-1542838132-92c53300491e?w=200&q=75",
 };
 function smartImg(n){ for(const [re,k] of NAME_IMG) if(re.test(n)) return IMGS[k]; return IMGS.default; }
-const CAT_EMOJI={"Lácteos":"🥛","Carnes":"🥩","Abarrotes":"🌾","Frutas y Verduras":"🥦","Limpieza":"🧴","Bebestibles":"🥤","Panadería":"🍞","Congelados":"🧊","Higiene":"🧼","Otros":"📦"};
+const CAT_EMOJI={"Lácteos":"🥛","Carnes":"🥩","Cecinas y Fiambres":"🥓","Pescados y Mariscos":"🐟","Frutas y Verduras":"🥦","Abarrotes":"🌾","Panadería":"🍞","Congelados":"🧊","Bebestibles":"🥤","Snacks y Dulces":"🍫","Desayuno y Cereales":"🥣","Condimentos y Salsas":"🧂","Conservas":"🥫","Limpieza":"🧴","Higiene Personal":"🧼","Bebé":"🍼","Mascotas":"🐾","Hogar y Bazar":"🏠","Otros":"📦"};
 
 // Sugerencias de días por nombre
 const DAYS_SUGGEST=[
-  [/leche\b/i,3],[/yogurt/i,5],[/mantequilla/i,14],[/queso/i,7],
-  [/pollo|pechuga/i,2],[/vacuno|filete|lomo|costilla/i,3],[/jamon/i,5],
-  [/arroz/i,30],[/pasta|fideo/i,14],[/aceite/i,30],[/harina/i,30],
-  [/pan\b|molde/i,5],[/detergen|ariel/i,30],[/papel/i,14],
-  [/coca|pepsi|bebida/i,3],[/agua\b/i,1],[/cafe/i,30],
+  [/leche\b/i,3],[/yogur|yoghurt/i,5],[/mantequilla|margarina/i,14],[/queso|quesillo/i,7],[/crema\b/i,7],
+  [/pollo|pechuga|trutro/i,2],[/vacuno|filete|lomo|costilla|posta|asado|carne molida/i,3],[/cerdo|chuleta/i,3],
+  [/jamon|salame|mortadela|vienesa|salchich/i,5],[/pescado|salmon|merluza|reineta|atun fresco/i,2],[/marisco|camaron/i,2],
+  [/arroz/i,30],[/pasta|fideo|tallarin/i,20],[/aceite/i,45],[/harina/i,30],[/azucar|sal\b/i,60],[/legumbre|lenteja|poroto|garbanzo/i,60],
+  [/pan\b|molde|marraqueta|hallulla/i,4],[/huevo/i,14],
+  [/detergen|ariel|omo|suavizante/i,45],[/cloro|lavaloza|limpiador|desinfect/i,45],
+  [/papel higienico|confort|elite/i,20],[/toalla|servilleta/i,20],[/shampoo|jabon|pasta dental|desodorante/i,45],
+  [/coca|pepsi|bebida|jugo|nectar/i,4],[/agua\b/i,3],[/cafe|te\b|hierba/i,45],[/cerveza|vino|licor/i,14],
+  [/cereal|avena|corn flakes/i,20],[/galleta|snack|papas fritas|ramitas/i,10],[/chocolate|dulce|caramelo/i,20],
+  [/salsa|ketchup|mayonesa|mostaza/i,45],[/conserva|atun\b|jurel|choclo\b/i,180],
+  [/pañal|toallita|formula/i,10],[/comida perro|comida gato|mascota/i,30],
 ];
 function suggestDays(name){ for(const [re,d] of DAYS_SUGGEST) if(re.test(name)) return d; return null; }
+
+// Adivina la categoría de inventario según el nombre del producto
+const CAT_GUESS=[
+  [/leche|yogur|queso|mantequilla|margarina|crema\b|quesillo/i,"Lácteos"],
+  [/pollo|vacuno|cerdo|carne|filete|lomo|posta|costilla|chuleta|pavo|molida/i,"Carnes"],
+  [/jamon|salame|mortadela|vienesa|salchich|tocino|cecina|fiambre/i,"Cecinas y Fiambres"],
+  [/pescado|salmon|merluza|reineta|atun fresco|marisco|camaron|choro|jaiba/i,"Pescados y Mariscos"],
+  [/manzana|platano|palta|tomate|lechuga|cebolla|papa|zanahoria|fruta|verdura|limon|naranja|palta/i,"Frutas y Verduras"],
+  [/arroz|fideo|pasta|tallarin|aceite|harina|azucar|\bsal\b|legumbre|lenteja|poroto|garbanzo/i,"Abarrotes"],
+  [/pan\b|molde|marraqueta|hallulla|baguette/i,"Panadería"],
+  [/congelad|helado|nugget/i,"Congelados"],
+  [/coca|pepsi|bebida|jugo|nectar|\bagua\b|cerveza|vino|licor|energetica/i,"Bebestibles"],
+  [/galleta|snack|papas fritas|ramitas|chocolate|dulce|caramelo|cereal barr/i,"Snacks y Dulces"],
+  [/cereal|avena|corn flakes|granola|mermelada|manjar/i,"Desayuno y Cereales"],
+  [/salsa|ketchup|mayonesa|mostaza|aji\b|condimento|comino|oregano|pimienta/i,"Condimentos y Salsas"],
+  [/conserva|atun\b|jurel|choclo\b|arveja en|durazno en/i,"Conservas"],
+  [/detergen|ariel|omo|suavizante|cloro|lavaloza|limpiador|desinfect|esponja/i,"Limpieza"],
+  [/papel higienico|confort|elite|toalla|servilleta|shampoo|jabon|pasta dental|desodorante|cepillo/i,"Higiene Personal"],
+  [/pañal|toallita humeda|formula|coleto/i,"Bebé"],
+  [/comida perro|comida gato|mascota|dogchow|whiskas/i,"Mascotas"],
+  [/pila|ampolleta|fosforo|vela|bolsa basura|papel aluminio|film/i,"Hogar y Bazar"],
+];
+function guessCat(name){ for(const [re,c] of CAT_GUESS) if(re.test(name)) return c; return "Abarrotes"; }
 
 function daysLeft(item){
   if(!item.daysDuration||item.daysDuration<=0||item.qty<=0) return item.qty===0?0:null;
@@ -1139,6 +1527,14 @@ function invStatus(item){
 }
 
 let activeInvFilter="all";
+function renderInvFilterBar(){
+  const bar=$("invFilterBar"); if(!bar) return;
+  // Solo mostrar categorías que tienen productos (+ "Todos")
+  const used=new Set(STATE.inventario.map(i=>CAT_EMOJI[i.cat]?i.cat:"Otros"));
+  const cats=Object.keys(CAT_EMOJI).filter(c=>used.has(c));
+  bar.innerHTML=`<div class="filter-pill ${activeInvFilter==="all"?"on":""}" onclick="filterInv('all',this)">Todos</div>`+
+    cats.map(c=>`<div class="filter-pill ${activeInvFilter===c?"on":""}" onclick="filterInv('${c}',this)">${CAT_EMOJI[c]} ${c}</div>`).join("");
+}
 function filterInv(cat,el){
   activeInvFilter=cat;
   document.querySelectorAll("#invFilterBar .filter-pill").forEach(p=>p.classList.remove("on"));
@@ -1207,6 +1603,7 @@ async function restockItem(id){
 
 function renderInventario(){
   renderShopList();
+  renderInvFilterBar();
   const list=activeInvFilter==="all"?STATE.inventario:STATE.inventario.filter(i=>i.cat===activeInvFilter);
   const grid=$("invGrid");
   if(!list.length){
@@ -1270,6 +1667,7 @@ async function addInvItem(){
   closeSheet("addInv");
   $("invName").value=""; $("invQty").value="1"; $("invDays").value="";
   renderInventario(); renderDashboard();
+  notifyPartner("inv", `${shortName(currentUser.displayName)} agregó ${name} al inventario`);
   toast("📦 "+name+" agregado");
 }
 
@@ -1408,8 +1806,8 @@ async function analyzeImage(b64data,mime){
     });
     if(!res.ok) throw new Error("API "+res.status);
     const data=await res.json();
-    const raw=(data.content?.[0]?.text||"").replace(/```json|```/g,"").trim();
-    showBoletaResult(JSON.parse(raw));
+    const raw=(data.content?.[0]?.text||"");
+    showBoletaResult(parseAIJson(raw));
   }catch(err){ showBoletaError("No se pudo analizar: "+err.message); }
 }
 
@@ -1485,7 +1883,7 @@ async function addAllToInv(){
       existing.qty+=(it.qty||1); existing.lastUpdate=today();
       await fsSet(`households/${HOUSEHOLD_ID}/inventario/${existing.id}`,{qty:existing.qty,lastUpdate:existing.lastUpdate});
     } else {
-      const newItem={name:it.name,cat:"Abarrotes",qty:it.qty||1,unit:it.unit||"un",brand:"",daysDuration:suggestDays(it.name)||null,addedBy:currentUser.uid,addedByName:currentUser.displayName||"",date:today(),lastUpdate:today()};
+      const newItem={name:it.name,cat:guessCat(it.name),qty:it.qty||1,unit:it.unit||"un",brand:"",daysDuration:suggestDays(it.name)||null,addedBy:currentUser.uid,addedByName:currentUser.displayName||"",date:today(),lastUpdate:today()};
       const newId=await fsAdd(`households/${HOUSEHOLD_ID}/inventario`,newItem);
       STATE.inventario.push({id:newId,...newItem});
     }
@@ -1503,6 +1901,8 @@ async function addAllToInv(){
 //  DEUDAS (COMPARTIDO — Firestore)
 // ══════════════════════════════════════════════════
 let debtPeriod="month";
+let debtYear=new Date().getFullYear();
+let debtMonth=new Date().getMonth(); // 0-11, para navegación mensual
 
 // Balance absoluto Felipe vs Meli (independiente de quién esté logueado)
 function computeDebtBalances(list){
@@ -1524,25 +1924,107 @@ function setDebtPeriod(p,el){
   renderDeudas();
 }
 
+function shiftDebtMonth(delta){
+  debtMonth+=delta;
+  while(debtMonth>11){ debtMonth-=12; debtYear++; }
+  while(debtMonth<0){ debtMonth+=12; debtYear--; }
+  debtPeriod="month";
+  renderDeudas();
+}
+
+function setDebtYear(y){ debtYear=y; renderDeudas(); }
+
+const MESES=["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"];
+
+function debtDateOf(d){
+  const rawDate=d.date||(d.createdAt?.seconds?new Date(d.createdAt.seconds*1000).toISOString().slice(0,10):today());
+  return new Date(rawDate+"T12:00:00");
+}
+
 function getDebtPeriodList(){
-  const now=new Date();
   return STATE.debts.filter(d=>{
-    const rawDate=d.date||(d.createdAt?.seconds?new Date(d.createdAt.seconds*1000).toISOString().slice(0,10):today());
-    const dt=new Date(rawDate+"T12:00:00");
+    const dt=debtDateOf(d);
     if(debtPeriod==="all") return true;
-    if(debtPeriod==="month") return dt.getMonth()===now.getMonth()&&dt.getFullYear()===now.getFullYear();
-    if(debtPeriod==="week"){
-      const day=now.getDay()===0?7:now.getDay();
-      const mon=new Date(now); mon.setDate(now.getDate()-day+1); mon.setHours(0,0,0,0);
-      const sun=new Date(mon); sun.setDate(mon.getDate()+6); sun.setHours(23,59,59);
-      return dt>=mon&&dt<=sun;
-    }
-    if(debtPeriod==="lastmonth") return dt.getMonth()===(now.getMonth()-1+12)%12;
+    if(debtPeriod==="year") return dt.getFullYear()===debtYear;
+    if(debtPeriod==="future"){ const now=new Date(); now.setDate(1); now.setHours(0,0,0,0); return dt>=now; }
+    if(debtPeriod==="month") return dt.getMonth()===debtMonth&&dt.getFullYear()===debtYear;
     return true;
   });
 }
 
+// ── Gráfico de proyección de deudas hacia adelante ──
+function renderDebtProjection(){
+  const box=$("debtProjection"); if(!box) return;
+  // Solo mostrar el gráfico en vistas "año" y "futuro"
+  if(debtPeriod!=="year" && debtPeriod!=="future"){ box.innerHTML=""; return; }
+
+  const now=new Date(); const curKey=now.getFullYear()*12+now.getMonth();
+  // Construir totales pendientes por mes
+  const monthly={}; // key "YYYY-MM" → monto pendiente
+  STATE.debts.filter(d=>!d.paid).forEach(d=>{
+    const dt=debtDateOf(d);
+    const k=dt.getFullYear()+"-"+String(dt.getMonth()+1).padStart(2,"0");
+    monthly[k]=(monthly[k]||0)+d.amount;
+  });
+
+  // Rango de meses a mostrar
+  let months=[];
+  if(debtPeriod==="year"){
+    for(let m=0;m<12;m++) months.push({y:debtYear,m});
+  } else { // future: desde este mes, 12 hacia adelante
+    for(let i=0;i<12;i++){ const idx=curKey+i; months.push({y:Math.floor(idx/12),m:idx%12}); }
+  }
+
+  const data=months.map(({y,m})=>{
+    const k=y+"-"+String(m+1).padStart(2,"0");
+    return {y,m,total:monthly[k]||0};
+  });
+  const maxV=Math.max(...data.map(d=>d.total),1);
+  const totalPeriodo=data.reduce((a,d)=>a+d.total,0);
+
+  // Deuda acumulada restante (cómo baja de aquí en adelante)
+  let acumFuturo=0;
+  if(debtPeriod==="future"){ acumFuturo=totalPeriodo; }
+
+  const bars=data.map((d,i)=>{
+    const h=Math.round(d.total/maxV*100);
+    const isPast=(d.y*12+d.m)<curKey;
+    const isCurrent=(d.y*12+d.m)===curKey;
+    const col=isPast?"var(--text3)":isCurrent?"var(--accent)":"var(--accent2)";
+    return `<div class="dbar-col" onclick="jumpToMonth(${d.y},${d.m})">
+      <div class="dbar-val">${d.total?clp(d.total).replace("$",""):""}</div>
+      <div class="dbar-track"><div class="dbar-fill" style="height:${d.total?Math.max(h,3):0}%;background:${col}"></div></div>
+      <div class="dbar-lbl ${isCurrent?"cur":""}">${MESES[d.m].slice(0,3)}${debtPeriod==="future"&&d.m===0?"'"+String(d.y).slice(2):""}</div>
+    </div>`;
+  }).join("");
+
+  box.innerHTML=`
+    <div class="debt-proj-card">
+      <div class="dproj-head">
+        <div class="dproj-title">${debtPeriod==="future"?"📈 Proyección próximos 12 meses":`📊 Deudas ${debtYear} por mes`}</div>
+        <div class="dproj-total">${clp(totalPeriodo)}<span> total pendiente</span></div>
+      </div>
+      <div class="dbar-chart">${bars}</div>
+      ${debtPeriod==="future"&&totalPeriodo>0?`<div class="dproj-note">Si pagas todo lo agendado, en 12 meses habrás liquidado <strong>${clp(acumFuturo)}</strong>. Toca un mes para ver el detalle.</div>`:`<div class="dproj-note">Toca cualquier barra para ver el detalle de ese mes.</div>`}
+    </div>`;
+}
+
+function jumpToMonth(y,m){
+  debtYear=y; debtMonth=m; debtPeriod="month"; renderDeudas();
+}
+
 function renderDeudas(){
+  // Sincronizar UI de período
+  const lbl=$("debtMonthLabel");
+  if(lbl) lbl.textContent = debtPeriod==="month" ? `${MESES[debtMonth]} ${debtYear}`
+    : debtPeriod==="year" ? `Todo ${debtYear}`
+    : debtPeriod==="future" ? "Deudas a futuro"
+    : "Historial completo";
+  document.querySelectorAll("#page-deudas .filter-pill").forEach(x=>x.classList.remove("on"));
+  $("dpill-"+debtPeriod)?.classList.add("on");
+  const yPill=$("dpill-year"); if(yPill) yPill.textContent="Año "+debtYear;
+  renderDebtProjection();
+
   const pList=getDebtPeriodList();
   const bal=computeDebtBalances(pList);
 
@@ -1580,6 +2062,7 @@ function renderDeudas(){
       ?`${otherS} debe ${clp(Math.round(d.amount/2))}`
       :d.owed===d.payer?`Sin deuda para ${otherS}`
       :`${shortName(d.owed)} debe ${clp(d.amount)}`;
+    const serieInfo=d.groupId?(()=>{const all=STATE.debts.filter(x=>x.groupId===d.groupId);const paid=all.filter(x=>x.paid).length;return{n:all.length,paid};})():null;
     return `<div class="debt-item${d.paid?" paid":""}">
       <div class="di-avatar" style="background:${isFel(d.payer)?"linear-gradient(135deg,#6B4EFF,#4E9FFF)":"linear-gradient(135deg,#FF6B9A,#FF6B6B)"}">${payerS[0]}</div>
       <div class="di-info">
@@ -1589,6 +2072,7 @@ function renderDeudas(){
         <div class="di-tags">
           <span class="di-tag cat">${CAT_EM[d.cat]||"📦"} ${d.cat}</span>
           <span class="di-tag ${d.paid?"done":"pend"}">${d.paid?"✅ Pagado":"⏳ Pendiente"}</span>
+          ${serieInfo?`<span class="di-tag serie">🔁 Serie ${serieInfo.paid}/${serieInfo.n}</span>`:""}
         </div>
       </div>
       <div class="di-right">
@@ -1596,6 +2080,8 @@ function renderDeudas(){
         <div class="di-actions">
           <button class="btn btn-sm ${d.paid?"btn-ghost":"btn-green"}" onclick="toggleDebt('${d.id}')" style="padding:5px 10px;font-size:10px">${d.paid?"↩️":"✅"}</button>
           <button class="btn btn-red btn-sm" onclick="removeDebt('${d.id}')" style="padding:5px 10px;font-size:10px">🗑️</button>
+          ${serieInfo?`<button class="btn ${serieInfo.paid<serieInfo.n?"btn-green":"btn-ghost"} btn-sm" onclick="toggleDebtSeries('${d.groupId}')" style="padding:5px 8px;font-size:9px" title="Marcar toda la serie">🔁${serieInfo.paid<serieInfo.n?"✅":"↩️"}</button>
+          <button class="btn btn-red btn-sm" onclick="removeDebtSeries('${d.groupId}')" style="padding:5px 8px;font-size:9px" title="Borrar toda la serie">🔁🗑️</button>`:""}
         </div>
       </div>
     </div>`;
@@ -1609,15 +2095,30 @@ async function addDebt(){
   const payer= $("dPayer").value;
   const owed=  $("dOwed").value;
   const cat=   $("dCat").value;
+  const baseDate=$("dDate").value||today();
+  const repeat=parseInt($("dRepeat").value)||1;
   if(!desc||!amount){ toast("Completa descripción y monto","error"); return; }
   const myName=currentUser.displayName||currentUser.email.split("@")[0];
-  const newDebt={desc,amount,payer,owed,cat,date:today(),paid:false,addedBy:currentUser.uid,addedByName:myName};
-  const newId=await fsAdd(`households/${HOUSEHOLD_ID}/debts`,newDebt);
-  STATE.debts.unshift({id:newId,...newDebt}); LS.set("debts",STATE.debts);
+  setLoading(true, repeat>1?`Creando ${repeat} cuotas...`:"Registrando...");
+  const groupId=repeat>1?uid():null;
+  const [by,bm,bd]=baseDate.split("-").map(Number);
+  for(let i=0;i<repeat;i++){
+    // Avanzar i meses desde la fecha base, conservando el día
+    const dt=new Date(by,bm-1+i,bd);
+    const dateStr=`${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,"0")}-${String(dt.getDate()).padStart(2,"0")}`;
+    const label=repeat>1?`${desc} (${i+1}/${repeat})`:desc;
+    const newDebt={desc:label,amount,payer,owed,cat,date:dateStr,paid:false,addedBy:currentUser.uid,addedByName:myName};
+    if(groupId) newDebt.groupId=groupId;
+    const newId=await fsAdd(`households/${HOUSEHOLD_ID}/debts`,newDebt);
+    STATE.debts.unshift({id:newId,...newDebt});
+  }
+  LS.set("debts",STATE.debts);
+  setLoading(false);
   closeSheet("addDebt");
-  $("dDesc").value=""; $("dAmount").value="";
+  $("dDesc").value=""; $("dAmount").value=""; $("dDate").value=""; $("dRepeat").value="1";
   renderDeudas(); renderDashboard();
-  toast("💸 Gasto registrado: "+clp(amount));
+  notifyPartner("deuda", `${shortName(payer)} registró: ${desc} · ${clp(amount)}${repeat>1?` (${repeat} meses)`:""}`);
+  toast(repeat>1?`💸 ${repeat} cuotas creadas: ${clp(amount)} c/u`:"💸 Gasto registrado: "+clp(amount));
 }
 
 async function toggleDebt(id){
@@ -1632,6 +2133,33 @@ async function removeDebt(id){
   await fsDel(`households/${HOUSEHOLD_ID}/debts/${id}`);
   STATE.debts=STATE.debts.filter(x=>x.id!==id); LS.set("debts",STATE.debts);
   renderDeudas(); renderDashboard(); toast("🗑️ Gasto eliminado");
+}
+
+async function toggleDebtSeries(groupId){
+  const serie=STATE.debts.filter(d=>d.groupId===groupId);
+  if(!serie.length) return;
+  const allPaid=serie.every(d=>d.paid);
+  const target=!allPaid;
+  if(!confirm(target?`¿Marcar las ${serie.length} cuotas como pagadas?`:`¿Marcar las ${serie.length} cuotas como pendientes?`)) return;
+  setLoading(true,"Actualizando serie...");
+  for(const d of serie){ d.paid=target; await fsSet(`households/${HOUSEHOLD_ID}/debts/${d.id}`,{paid:target}); }
+  LS.set("debts",STATE.debts);
+  setLoading(false);
+  renderDeudas(); renderDashboard();
+  toast(target?"✅ Serie completa marcada como pagada":"↩️ Serie marcada como pendiente");
+}
+
+async function removeDebtSeries(groupId){
+  const serie=STATE.debts.filter(d=>d.groupId===groupId);
+  if(!serie.length) return;
+  const total=serie.reduce((a,d)=>a+d.amount,0);
+  if(!confirm(`¿Eliminar TODA la serie completa?\n\n"${serie[0].desc.replace(/\s*\(\d+\/\d+\)/,"")}"\n${serie.length} cuotas · ${clp(total)} en total\n\nEsta acción no se puede deshacer.`)) return;
+  setLoading(true,`Eliminando ${serie.length} cuotas...`);
+  for(const d of serie){ await fsDel(`households/${HOUSEHOLD_ID}/debts/${d.id}`); }
+  STATE.debts=STATE.debts.filter(d=>d.groupId!==groupId); LS.set("debts",STATE.debts);
+  setLoading(false);
+  renderDeudas(); renderDashboard();
+  toast(`🗑️ Serie completa eliminada (${serie.length} cuotas)`);
 }
 
 // Debt preview
@@ -1727,16 +2255,14 @@ Usa exactamente estos nombres de supermercado: Líder, Jumbo, Santa Isabel, Unim
     const res=await fetch("https://api.anthropic.com/v1/messages",{
       method:"POST",
       headers:{"Content-Type":"application/json","x-api-key":anthKey(),"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
-      body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:4000,
+      body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:5000,
         messages:[{role:"user",content:prompt}],
-        tools:[{type:"web_search_20250305",name:"web_search",max_uses:6}]})
+        tools:[{type:"web_search_20250305",name:"web_search",max_uses:5}]})
     });
     const data=await res.json();
     if(data.error) throw new Error(data.error.message||"Error de API");
     const text=(data.content||[]).map(b=>b.type==="text"?b.text:"").join("");
-    const clean=text.replace(/```json|```/g,"").trim();
-    const jsonStr=clean.slice(clean.indexOf("{"),clean.lastIndexOf("}")+1);
-    const parsed=JSON.parse(jsonStr);
+    const parsed=parseAIJson(text);
     const ofertas=(parsed.ofertas||[]).filter(o=>o.producto&&o.precio);
     if(!ofertas.length) throw new Error("No se encontraron ofertas esta vez, intenta de nuevo");
     LS.set("ofertas",{ts:Date.now(),week:weekKey(),data:ofertas});
@@ -1934,8 +2460,8 @@ function updateBadges(){
 // ══════════════════════════════════════════════════
 //  SHEETS
 // ══════════════════════════════════════════════════
-function openSheet(id){ $("sheet-"+id).classList.add("open"); }
-function closeSheet(id){ $("sheet-"+id).classList.remove("open"); }
+function openSheet(id){ $("sheet-"+id).classList.add("open"); if(id==="addDebt"&&$("dDate")&&!$("dDate").value)$("dDate").value=today(); }
+function closeSheet(id){ $("sheet-"+id).classList.remove("open"); if(id==="addExpense"){ editingExpId=null; const w=$("expRepeatWrap"); if(w)w.style.display="block"; } }
 function closeSheetIfBack(e,id){ if(e.target===$("sheet-"+id)) closeSheet(id); }
 
 // Init: restaurar sesión + listeners de preview de deudas
@@ -2058,6 +2584,69 @@ img{display:block;max-width:100%}
 .card-big{font-size:28px;font-weight:800;font-family:"Fraunces",serif;color:var(--accent);margin:4px 0 10px;display:flex;align-items:baseline;gap:8px}
 .card-est-tag{font-size:10px;font-weight:700;font-family:"Inter",sans-serif;background:var(--yellowbg);color:var(--yellow);border-radius:12px;padding:2px 8px}
 .card-detail{font-size:11px;color:var(--text2);margin-top:8px;padding-top:8px;border-top:1px solid var(--border);line-height:1.4}
+/* Navegador de mes en Deudas */
+.month-nav{display:flex;align-items:center;justify-content:space-between;background:var(--sur);border:1px solid var(--border);border-radius:var(--r);padding:6px 8px;box-shadow:var(--sh)}
+.month-nav-btn{width:36px;height:36px;border:none;background:var(--bg2);border-radius:10px;font-size:20px;font-weight:700;color:var(--accent);cursor:pointer;-webkit-tap-highlight-color:transparent}
+.month-nav-btn:active{background:var(--accentbg)}
+.month-nav-label{font-size:15px;font-weight:800;font-family:"Fraunces",serif}
+/* Gráfico de proyección de deuda */
+.debt-proj-card{background:var(--sur);border:1px solid var(--border);border-radius:var(--r-l);padding:14px 12px;box-shadow:var(--sh);margin-bottom:6px}
+.dproj-head{display:flex;justify-content:space-between;align-items:flex-start;padding:0 4px;margin-bottom:12px;gap:8px}
+.dproj-title{font-size:12.5px;font-weight:800}
+.dproj-total{font-size:14px;font-weight:800;color:var(--accent);text-align:right;white-space:nowrap}
+.dproj-total span{display:block;font-size:9px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.3px}
+.dbar-chart{display:flex;align-items:flex-end;gap:3px;height:130px;padding:0 2px}
+.dbar-col{flex:1;display:flex;flex-direction:column;align-items:center;height:100%;cursor:pointer;-webkit-tap-highlight-color:transparent}
+.dbar-val{font-size:7.5px;font-weight:700;color:var(--text3);margin-bottom:2px;height:10px;white-space:nowrap}
+.dbar-track{flex:1;width:100%;display:flex;align-items:flex-end;background:var(--bg2);border-radius:4px;overflow:hidden}
+.dbar-fill{width:100%;border-radius:4px 4px 0 0;transition:height .5s ease;min-height:0}
+.dbar-lbl{font-size:9px;font-weight:600;color:var(--text3);margin-top:5px}
+.dbar-lbl.cur{color:var(--accent);font-weight:800}
+.dproj-note{font-size:11px;color:var(--text2);margin-top:10px;padding-top:9px;border-top:1px solid var(--border);line-height:1.4}
+/* Indicadores económicos */
+.indicators-bar{display:flex;gap:8px;overflow-x:auto;padding:2px 18px 12px;-webkit-overflow-scrolling:touch;cursor:pointer}
+.indicators-bar::-webkit-scrollbar{display:none}
+.ind-loading{font-size:12px;color:var(--text3);padding:8px 2px}
+.ind-item{display:flex;align-items:center;gap:8px;background:var(--sur);border:1px solid var(--border);border-radius:var(--r);padding:9px 13px;box-shadow:var(--sh);flex-shrink:0}
+.ind-emoji{font-size:18px}
+.ind-label{font-size:9.5px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.4px}
+.ind-val{font-size:14px;font-weight:800;font-family:"Fraunces",serif}
+.di-tag.serie{background:var(--accentbg);color:var(--accent2)}
+/* Tendencia de gastos */
+.trend-card:empty,.budget-card:empty{display:none}
+.trend-card{margin:0 18px 14px;background:var(--sur);border:1px solid var(--border);border-radius:var(--r-l);padding:15px 16px;box-shadow:var(--sh)}
+.trend-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;gap:8px}
+.trend-title{font-size:13px;font-weight:800}
+.trend-diff{font-size:11px;font-weight:700}
+.tbar-chart{display:flex;align-items:flex-end;gap:6px;height:110px}
+.tbar-col{flex:1;display:flex;flex-direction:column;align-items:center;height:100%;cursor:default}
+.tbar-val{font-size:8px;font-weight:700;color:var(--text3);margin-bottom:3px;height:10px;white-space:nowrap}
+.tbar-track{flex:1;width:100%;display:flex;align-items:flex-end;background:var(--bg2);border-radius:5px;overflow:hidden}
+.tbar-fill{width:100%;border-radius:5px 5px 0 0;transition:height .5s ease}
+.tbar-lbl{font-size:9.5px;font-weight:600;color:var(--text3);margin-top:5px}
+.tbar-lbl.cur{color:var(--accent);font-weight:800}
+.trend-note{font-size:11px;color:var(--text2);margin-top:10px;padding-top:9px;border-top:1px solid var(--border)}
+/* Presupuesto */
+.budget-card{margin:0 18px 14px;background:var(--sur);border:1px solid var(--border);border-radius:var(--r-l);padding:15px 16px;box-shadow:var(--sh)}
+.budget-head{margin-bottom:10px}
+.budget-title{font-size:13px;font-weight:800}
+.budget-empty{font-size:12px;color:var(--text3);padding:4px 0 10px}
+.budget-row{padding:9px 0;border-top:1px solid var(--border);cursor:pointer}
+.budget-row:first-of-type{border-top:none}
+.budget-top{display:flex;justify-content:space-between;font-size:12.5px;font-weight:600;margin-bottom:6px}
+.budget-bar{height:7px;background:var(--bg3);border-radius:5px;overflow:hidden}
+.budget-fill{height:100%;border-radius:5px;transition:width .5s ease}
+.budget-over{font-size:10.5px;font-weight:700;color:var(--red);margin-top:4px}
+.budget-add-chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.budget-add-chip{font-size:10.5px;font-weight:700;background:var(--bg2);border:1px dashed var(--border2);border-radius:14px;padding:4px 10px;cursor:pointer;color:var(--text2)}
+.budget-add-chip:active{background:var(--accentbg)}
+/* Herramientas de gastos */
+.exp-tools{display:flex;gap:8px;margin-bottom:10px}
+.exp-search{flex:1;background:var(--sur);border:1px solid var(--border2);border-radius:var(--r-s);padding:9px 13px;font-size:13px;color:var(--text);font-family:"Inter",sans-serif}
+.exp-search:focus{outline:none;border-color:var(--accent)}
+.sheet-topbar{display:flex;align-items:center;margin-bottom:14px}
+.sheet-back-btn{background:var(--bg2);border:1px solid var(--border2);border-radius:20px;padding:8px 16px;font-size:13px;font-weight:700;color:var(--accent);cursor:pointer;-webkit-tap-highlight-color:transparent;font-family:"Inter",sans-serif}
+.sheet-back-btn:active{background:var(--accentbg)}
 
 /* ── Donut finanzas ── */
 .fin-donut-card{margin:0 18px 14px;background:var(--sur);border:1px solid var(--border);border-radius:var(--r-l);padding:16px 18px;box-shadow:var(--sh)}
@@ -2352,7 +2941,8 @@ img{display:block;max-width:100%}
 .overlay.open{opacity:1;pointer-events:all}
 .sheet{background:var(--bg1);border-radius:var(--r-xl) var(--r-xl) 0 0;width:100%;padding:18px 18px calc(18px + var(--safe-b));transform:translateY(100%);transition:transform .3s cubic-bezier(.4,0,.2,1);max-height:92vh;overflow-y:auto}
 .overlay.open .sheet{transform:translateY(0)}
-.sheet-handle{width:34px;height:4px;border-radius:2px;background:var(--border2);margin:0 auto 18px}
+.sheet-handle{width:44px;height:5px;border-radius:3px;background:var(--border2);margin:0 auto 18px;cursor:pointer;padding:8px 20px;box-sizing:content-box;background-clip:content-box;-webkit-tap-highlight-color:transparent}
+.sheet-handle:active{background:var(--accent);background-clip:content-box}
 .sheet-title{font-family:"Fraunces",serif;font-size:19px;font-weight:700;margin-bottom:18px}
 
 /* ── FIELDS ── */
@@ -2446,6 +3036,9 @@ img{display:block;max-width:100%}
         <div class="dash-hero-btn" id="heroBtnLbl">📷 Agregar foto del hogar</div>
         <input type="file" id="heroInput" accept="image/*" style="display:none" onchange="loadHeroImg(event)">
       </div>
+      <div class="indicators-bar" id="indicatorsBar" onclick="loadIndicators(true)">
+        <div class="ind-loading">💱 Cargando indicadores...</div>
+      </div>
       <div class="context-ticker" id="contextTicker"></div>
       <div id="reminderBanner"></div>
       <div class="stats-grid" id="statsGrid"></div>
@@ -2479,8 +3072,9 @@ img{display:block;max-width:100%}
       <div class="sec-header">
         <div><div class="sec-title">Mis Finanzas</div><div class="sec-subtitle">Solo tú puedes ver esto</div></div>
         <div style="display:flex;gap:8px">
+          <div class="sec-action" onclick="runMonthSummary()">📅 Resumen</div>
           <div class="sec-action" onclick="runInsights()">🤖 Insights</div>
-          <div class="sec-action" onclick="openSheet('addExpense')">+ Gasto</div>
+          <div class="sec-action" onclick="openAddExpense()">+ Gasto</div>
         </div>
       </div>
       <div class="priv-indicator">🔒 Datos privados — solo visibles en tu sesión</div>
@@ -2497,6 +3091,10 @@ img{display:block;max-width:100%}
       </div>
 
       <div class="proj-card" id="projCard"></div>
+
+      <div id="trendCard" class="trend-card"></div>
+
+      <div id="budgetCard" class="budget-card"></div>
 
       <div class="finance-summary">
         <div class="fin-total-label">Gasto total registrado</div>
@@ -2527,6 +3125,10 @@ img{display:block;max-width:100%}
       <div id="insightsPanel"></div>
 
       <div style="padding:0 18px 4px">
+        <div class="exp-tools">
+          <input class="exp-search" id="expSearch" type="text" placeholder="🔍 Buscar gasto..." oninput="renderFinanzas()">
+          <button class="btn btn-ghost btn-sm" onclick="exportExpensesCSV()">📤 CSV</button>
+        </div>
         <div class="cat-chips" id="finCatChips"></div>
       </div>
       <div class="expense-list" id="expenseList"></div>
@@ -2542,14 +3144,7 @@ img{display:block;max-width:100%}
         </div>
       </div>
       <div class="shared-indicator" id="invSyncStatus">📴 Solo este dispositivo</div>
-      <div class="inv-filter-bar" id="invFilterBar">
-        <div class="filter-pill on" onclick="filterInv('all',this)">Todos</div>
-        <div class="filter-pill" onclick="filterInv('Lácteos',this)">🥛 Lácteos</div>
-        <div class="filter-pill" onclick="filterInv('Carnes',this)">🥩 Carnes</div>
-        <div class="filter-pill" onclick="filterInv('Abarrotes',this)">🌾 Abarrotes</div>
-        <div class="filter-pill" onclick="filterInv('Limpieza',this)">🧴 Limpieza</div>
-        <div class="filter-pill" onclick="filterInv('Bebestibles',this)">🥤 Bebestibles</div>
-      </div>
+      <div class="inv-filter-bar" id="invFilterBar"></div>
       <div class="shoplist-card">
         <div class="shoplist-head">
           <div><div class="shoplist-title">🛒 Por comprar</div><div class="shoplist-sub">Para la próxima compra del hogar</div></div>
@@ -2586,18 +3181,26 @@ img{display:block;max-width:100%}
     <!-- ── DEUDAS ── -->
     <div class="page" id="page-deudas">
       <div class="sec-header">
-        <div><div class="sec-title">Deudas del hogar</div><div class="sec-subtitle">Gastos compartidos</div></div>
+        <div><div class="sec-title">Deudas del Hogar</div><div class="sec-subtitle">Felipe & Meli · compartido</div></div>
         <div class="sec-action" onclick="openSheet('addDebt')">+ Registrar</div>
       </div>
       <div class="shared-indicator">👥 Compartido · Felipe y Melisa ven esto en tiempo real</div>
       <div style="padding:0 18px 14px"><div class="debt-hero" id="debtHero"></div></div>
       <div style="padding:0 18px 12px"><div id="debtBalancePill"></div></div>
-      <div class="context-ticker" style="padding:0 18px 14px">
-        <div class="filter-pill on" onclick="setDebtPeriod('month',this)">Este mes</div>
-        <div class="filter-pill" onclick="setDebtPeriod('week',this)">Esta semana</div>
-        <div class="filter-pill" onclick="setDebtPeriod('lastmonth',this)">Mes anterior</div>
-        <div class="filter-pill" onclick="setDebtPeriod('all',this)">Todo</div>
+      <div style="padding:0 18px 10px">
+        <div class="month-nav">
+          <button class="month-nav-btn" onclick="shiftDebtMonth(-1)">‹</button>
+          <div class="month-nav-label" id="debtMonthLabel">—</div>
+          <button class="month-nav-btn" onclick="shiftDebtMonth(1)">›</button>
+        </div>
+        <div class="context-ticker" style="margin-top:10px">
+          <div class="filter-pill" id="dpill-month" onclick="setDebtPeriod('month',this)">Mes</div>
+          <div class="filter-pill" id="dpill-year" onclick="setDebtPeriod('year',this)">Año ${debtYear}</div>
+          <div class="filter-pill" id="dpill-future" onclick="setDebtPeriod('future',this)">📈 A futuro</div>
+          <div class="filter-pill" id="dpill-all" onclick="setDebtPeriod('all',this)">Todo</div>
+        </div>
       </div>
+      <div id="debtProjection" style="padding:0 18px 8px"></div>
       <div class="debt-list" id="debtList"></div>
       <div style="height:18px"></div>
     </div>
@@ -2605,7 +3208,7 @@ img{display:block;max-width:100%}
     <!-- ── BOLETA ── -->
     <div class="page" id="page-boleta">
       <div class="sec-header">
-        <div><div class="sec-title">Escáner de Boletas</div><div class="sec-subtitle">OCR · PDF · Cámara</div></div>
+        <div><div class="sec-title">Scaner de Boletas</div><div class="sec-subtitle">Foto · PDF · agrega al inventario</div></div>
       </div>
       <div class="shared-indicator">📄 Agrega productos al inventario automáticamente</div>
       <div style="padding:0 18px 18px">
@@ -2639,23 +3242,23 @@ img{display:block;max-width:100%}
     <div class="tab-item active" id="tab-dashboard" onclick="navTo('dashboard')">
       <div class="tab-icon">⊞</div><div class="tab-label">Inicio</div><div class="tab-active-bar"></div>
     </div>
+    <div class="tab-item" id="tab-ofertas" onclick="navTo('ofertas')">
+      <div class="tab-icon">🏷️</div><div class="tab-label">Ofertas</div><div class="tab-active-bar"></div>
+    </div>
+    <div class="tab-item" id="tab-boleta" onclick="navTo('boleta')">
+      <div class="tab-icon">📷</div><div class="tab-label">Scaner</div><div class="tab-active-bar"></div>
+    </div>
     <div class="tab-item" id="tab-finanzas" onclick="navTo('finanzas')">
-      <div class="tab-icon">🔒</div><div class="tab-label">Personal</div>
+      <div class="tab-icon">💵</div><div class="tab-label">Personal</div>
       <div class="tab-priv-lock">🔐</div><div class="tab-active-bar"></div>
     </div>
     <div class="tab-item" id="tab-inventario" onclick="navTo('inventario')">
-      <div class="tab-icon">🏠</div><div class="tab-label">Inventario</div>
+      <div class="tab-icon">🏪</div><div class="tab-label">Inventario</div>
       <div class="tab-dot green" id="invDot" style="display:none"></div><div class="tab-active-bar"></div>
     </div>
     <div class="tab-item" id="tab-deudas" onclick="navTo('deudas')">
-      <div class="tab-icon">💸</div><div class="tab-label">Deudas</div>
+      <div class="tab-icon">🏠</div><div class="tab-label">Deudas Hogar</div>
       <div class="tab-dot red" id="debtDot" style="display:none"></div><div class="tab-active-bar"></div>
-    </div>
-    <div class="tab-item" id="tab-boleta" onclick="navTo('boleta')">
-      <div class="tab-icon">📄</div><div class="tab-label">Boleta</div><div class="tab-active-bar"></div>
-    </div>
-    <div class="tab-item" id="tab-ofertas" onclick="navTo('ofertas')">
-      <div class="tab-icon">🏷️</div><div class="tab-label">Ofertas</div><div class="tab-active-bar"></div>
     </div>
   </div>
 </div>
@@ -2675,8 +3278,8 @@ img{display:block;max-width:100%}
 <!-- Add Expense -->
 <div class="overlay" id="sheet-addExpense" onclick="closeSheetIfBack(event,'addExpense')">
   <div class="sheet">
-    <div class="sheet-handle"></div>
-    <div class="sheet-title">Registrar gasto personal</div>
+    <div class="sheet-handle" onclick="closeSheet('addExpense')"></div>
+    <div class="sheet-title" id="expSheetTitle">Registrar gasto personal</div>
     <div class="priv-indicator" style="margin:0 0 16px">🔒 Solo tú verás este gasto</div>
     <div style="display:flex;flex-direction:column;gap:12px">
       <div class="field-group"><label>Descripción</label><input class="field-input" id="expDesc" type="text" placeholder="Ej: Bencina Shell Calama"></div>
@@ -2684,11 +3287,21 @@ img{display:block;max-width:100%}
         <div class="field-group"><label>Monto CLP</label><input class="field-input" id="expAmount" type="text" inputmode="numeric" placeholder="45.000" oninput="fmtMoneyInput(this)"></div>
         <div class="field-group"><label>Fecha</label><input class="field-input" id="expDate" type="date"></div>
       </div>
+      <div class="field-group" id="expRepeatWrap">
+        <label>🔁 Repetir a futuro (opcional)</label>
+        <select class="field-input" id="expRepeat">
+          <option value="1">Solo esta vez</option>
+          <option value="3">Próximos 3 meses</option>
+          <option value="6">Próximos 6 meses</option>
+          <option value="12">Próximos 12 meses</option>
+        </select>
+        <div style="font-size:10.5px;color:var(--text3);margin-top:4px">Para suscripciones, gym, arriendo y gastos fijos mensuales</div>
+      </div>
       <div class="field-group">
         <label>Categoría</label>
         <div class="cat-chips" id="expCatChips" style="padding:0;margin-top:6px"></div>
       </div>
-      <button class="btn btn-accent btn-full" onclick="addExpense()">Registrar gasto</button>
+      <button class="btn btn-accent btn-full" id="expSubmitBtn" onclick="addExpense()">Registrar gasto</button>
     </div>
   </div>
 </div>
@@ -2696,7 +3309,7 @@ img{display:block;max-width:100%}
 <!-- Add Inventory -->
 <div class="overlay" id="sheet-addInv" onclick="closeSheetIfBack(event,'addInv')">
   <div class="sheet">
-    <div class="sheet-handle"></div>
+    <div class="sheet-handle" onclick="closeSheet('addInv')"></div>
     <div class="sheet-title">Agregar al inventario</div>
     <div style="display:flex;flex-direction:column;gap:12px">
       <div class="field-group">
@@ -2709,10 +3322,15 @@ img{display:block;max-width:100%}
           <label>Categoría</label>
           <select class="field-input" id="invCat">
             <option value="Lácteos">🥛 Lácteos</option><option value="Carnes">🥩 Carnes</option>
-            <option value="Abarrotes">🌾 Abarrotes</option><option value="Frutas y Verduras">🥦 F&V</option>
-            <option value="Limpieza">🧴 Limpieza</option><option value="Bebestibles">🥤 Bebidas</option>
+            <option value="Cecinas y Fiambres">🥓 Cecinas y Fiambres</option><option value="Pescados y Mariscos">🐟 Pescados y Mariscos</option>
+            <option value="Frutas y Verduras">🥦 Frutas y Verduras</option><option value="Abarrotes">🌾 Abarrotes</option>
             <option value="Panadería">🍞 Panadería</option><option value="Congelados">🧊 Congelados</option>
-            <option value="Higiene">🧼 Higiene</option><option value="Otros">📦 Otros</option>
+            <option value="Bebestibles">🥤 Bebestibles</option><option value="Snacks y Dulces">🍫 Snacks y Dulces</option>
+            <option value="Desayuno y Cereales">🥣 Desayuno y Cereales</option><option value="Condimentos y Salsas">🧂 Condimentos y Salsas</option>
+            <option value="Conservas">🥫 Conservas</option><option value="Limpieza">🧴 Limpieza</option>
+            <option value="Higiene Personal">🧼 Higiene Personal</option><option value="Bebé">🍼 Bebé</option>
+            <option value="Mascotas">🐾 Mascotas</option><option value="Hogar y Bazar">🏠 Hogar y Bazar</option>
+            <option value="Otros">📦 Otros</option>
           </select>
         </div>
         <div class="field-group" style="max-width:70px"><label>Cant.</label><input class="field-input" id="invQty" type="number" value="1" min="0"></div>
@@ -2734,13 +3352,16 @@ img{display:block;max-width:100%}
 <!-- Add Debt -->
 <div class="overlay" id="sheet-addDebt" onclick="closeSheetIfBack(event,'addDebt')">
   <div class="sheet">
-    <div class="sheet-handle"></div>
+    <div class="sheet-handle" onclick="closeSheet('addDebt')"></div>
     <div class="sheet-title">Registrar gasto del hogar</div>
     <div class="shared-indicator" style="margin:0 0 14px">👥 Felipe y Melisa verán esto en tiempo real</div>
     <div style="display:flex;flex-direction:column;gap:12px">
-      <div class="field-group"><label>Descripción</label><input class="field-input" id="dDesc" type="text" placeholder="Ej: Supermercado Jumbo semanal"></div>
+      <div class="field-group"><label>Descripción</label><input class="field-input" id="dDesc" type="text" placeholder="Ej: Dividendo, Crédito auto, Supermercado"></div>
       <div class="field-row">
         <div class="field-group"><label>Monto CLP</label><input class="field-input" id="dAmount" type="text" inputmode="numeric" placeholder="45.000" oninput="fmtMoneyInput(this)"></div>
+        <div class="field-group"><label>📅 Fecha (mes de la deuda)</label><input class="field-input" id="dDate" type="date"></div>
+      </div>
+      <div class="field-row">
         <div class="field-group">
           <label>¿Quién pagó?</label>
           <select class="field-input" id="dPayer">
@@ -2748,7 +3369,6 @@ img{display:block;max-width:100%}
             <option value="Melisa">Meli</option>
           </select>
         </div>
-      </div>
       <div class="field-row">
         <div class="field-group">
           <label>¿Quién debe?</label>
@@ -2771,6 +3391,17 @@ img{display:block;max-width:100%}
           </select>
         </div>
       </div>
+      <div class="field-group">
+        <label>🔁 Repetir a futuro (opcional)</label>
+        <select class="field-input" id="dRepeat">
+          <option value="1">Solo este mes</option>
+          <option value="3">Próximos 3 meses</option>
+          <option value="6">Próximos 6 meses</option>
+          <option value="12">Próximos 12 meses</option>
+          <option value="24">Próximos 24 meses</option>
+        </select>
+        <div style="font-size:10.5px;color:var(--text3);margin-top:4px">Ideal para dividendos, créditos y cuotas fijas — se crea una deuda por cada mes</div>
+      </div>
       <div id="debtPreview" style="background:var(--bg2);border-radius:var(--r-s);padding:10px;font-size:12px;color:var(--text2);display:none"></div>
       <button class="btn btn-accent btn-full" onclick="addDebt()">Registrar gasto</button>
     </div>
@@ -2780,7 +3411,10 @@ img{display:block;max-width:100%}
 <!-- Perfil + Panel de administración -->
 <div class="overlay" id="sheet-perfil" onclick="closeSheetIfBack(event,'perfil')">
   <div class="sheet">
-    <div class="sheet-handle"></div>
+    <div class="sheet-handle" onclick="closeSheet('perfil')"></div>
+    <div class="sheet-topbar">
+      <button class="sheet-back-btn" onclick="closeSheet('perfil')">‹ Volver</button>
+    </div>
     <div style="display:flex;align-items:center;gap:14px;margin-bottom:18px">
       <div class="prof-avatar" id="profAvatar">?</div>
       <div>
