@@ -21,6 +21,20 @@
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
 
 <script>
+// ── Captura de errores global: si algo falla, mostrarlo en vez de fallar en silencio ──
+window.addEventListener("error", function(ev){
+  try{
+    var box=document.getElementById("fatalError");
+    if(!box){
+      box=document.createElement("div");
+      box.id="fatalError";
+      box.style.cssText="position:fixed;bottom:0;left:0;right:0;z-index:99999;background:#F04E4E;color:#fff;padding:12px 16px;font:600 12px/1.4 system-ui,sans-serif;box-shadow:0 -4px 20px rgba(0,0,0,.3)";
+      document.body&&document.body.appendChild(box);
+    }
+    box.textContent="⚠️ Error: "+(ev.message||"desconocido")+(ev.filename?" ("+ev.lineno+")":"");
+  }catch(e){}
+});
+
 // ══════════════════════════════════════════════════
 //  ⚙️ SINCRONIZACIÓN EN LÍNEA (Firebase) — CONFIGURA AQUÍ
 // ══════════════════════════════════════════════════
@@ -2578,6 +2592,16 @@ window.addEventListener("DOMContentLoaded",()=>{
   · Al ser una app 100% del lado del cliente, esta protección es
     de conveniencia doméstica, no seguridad bancaria.
 */
+
+// ── Garantizar que los onclick del HTML alcancen las funciones ──
+// (por si algún navegador aísla el scope del script)
+Object.assign(window, {
+  openProfile, closeSheet, configAnthropicKey, changeOwnPassword,
+  forgetSavedPassword, doLogout, navTo, selectUser, doLogin,
+  adminResetPassword, adminSettleDebts, adminClearDebts,
+  adminClearInventory, adminClearExpenses, toggleTheme
+});
+
 </script>
 <!-- PDF.js -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
@@ -3552,6 +3576,7 @@ img{display:block;max-width:100%}
     </div>
 
     <button class="btn btn-red btn-full" style="margin-top:14px" onclick="doLogout()">↩️ Cerrar sesión</button>
+    <div style="text-align:center;font-size:10px;color:var(--text3);margin-top:12px">ListaJuntos v8 · si ves esto, la app está actualizada</div>
   </div>
 </div>
 
