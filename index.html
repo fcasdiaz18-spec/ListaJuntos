@@ -92,6 +92,7 @@ const FIREBASE_CONFIG = {
 // localStorage de cada dispositivo. NO la escribas aquí si tu repo es público.
 const ANTHROPIC_KEY_FALLBACK = "";
 function anthKey(){ return localStorage.getItem("lj6_anthKey") || ANTHROPIC_KEY_FALLBACK; }
+const AI_MODEL = "claude-sonnet-4-6"; // modelo para todas las funciones de IA
 
 function configAnthropicKey(){
   const cur=anthKey();
@@ -684,11 +685,6 @@ function navTo(id) {
   // Lazy renders
   const renders = {finanzas:renderFinanzas,inventario:renderInventario,deudas:renderDeudas,ofertas:renderOfertas};
   if(renders[id]) renders[id]();
-  // Auto-cargar ofertas de la semana si hay clave y el cache es viejo
-  if(id==="ofertas" && anthKey()){
-    const c=LS.get("ofertas");
-    if(!c || c.week!==weekKey()) fetchOfertas(false);
-  }
 }
 
 // ══════════════════════════════════════════════════
@@ -793,10 +789,120 @@ function renderIndicators(ind){
     item("🧾","UTM",ind.utm);
 }
 
+// ══════════════════════════════════════════════════
+//  BENEFICIOS BANCARIOS por usuario (banner de Inicio)
+// ══════════════════════════════════════════════════
+function getBankCards(){ try{ return JSON.parse(localStorage.getItem("lj6_banks_"+currentUser.uid)||"[]"); }catch(e){ return []; } }
+function saveBankCards(list){ localStorage.setItem("lj6_banks_"+currentUser.uid, JSON.stringify(list)); }
+function getBankBenefits(){ try{ return JSON.parse(localStorage.getItem("lj6_bankben_"+currentUser.uid)||"null"); }catch(e){ return null; } }
+
+function addBankCard(){
+  const list=getBankCards();
+  const banco=prompt("¿Qué banco? (ej: Itaú, Banco de Chile, Santander, BCI, Scotiabank, Falabella...)");
+  if(!banco||!banco.trim()) return;
+  const tarjeta=prompt(`¿Nombre de la tarjeta de ${banco.trim()}? (ej: Black Legend, Signature, Platinum, Visa Gold...)`);
+  if(tarjeta===null) return;
+  list.push({id:uid(), banco:banco.trim(), tarjeta:(tarjeta||"").trim()});
+  saveBankCards(list);
+  renderBankBenefits();
+  toast(`💳 ${banco.trim()} agregado — toca "Buscar beneficios" para ver las promos del mes`);
+}
+
+function removeBankCard(id){
+  if(!confirm("¿Quitar esta tarjeta?")) return;
+  saveBankCards(getBankCards().filter(c=>c.id!==id));
+  renderBankBenefits();
+  toast("Tarjeta eliminada");
+}
+
+function renderBankBenefits(){
+  const box=$("bankBenefits"); if(!box) return;
+  const cards=getBankCards();
+  if(!cards.length){
+    box.innerHTML=`<div class="bank-setup" onclick="addBankCard()">
+      <div style="font-size:22px">💳</div>
+      <div style="flex:1">
+        <div class="bank-setup-t">Agrega tus tarjetas de banco</div>
+        <div class="bank-setup-s">Ve los beneficios del mes: cuotas sin interés, descuentos y promos exclusivas</div>
+      </div>
+      <div class="bank-setup-btn">＋</div>
+    </div>`;
+    return;
+  }
+  const ben=getBankBenefits();
+  const mesActual=today().slice(0,7);
+  const fresh = ben && ben.mes===mesActual;
+  let cardsHtml=cards.map(c=>{
+    const b = fresh ? (ben.beneficios||[]).find(x=>x.cardId===c.id) : null;
+    return `<div class="bank-card">
+      <div class="bank-card-head">
+        <div><span class="bank-card-name">💳 ${c.banco}${c.tarjeta?" · "+c.tarjeta:""}</span></div>
+        <button class="bank-card-x" onclick="removeBankCard('${c.id}')">✕</button>
+      </div>
+      ${b&&b.items&&b.items.length ? b.items.map(it=>`
+        <div class="bank-benefit">
+          <span class="bank-ben-tag" style="background:${it.tipo==="cuotas"?"var(--accentbg)":it.tipo==="descuento"?"var(--greenbg)":"var(--yellowbg)"};color:${it.tipo==="cuotas"?"var(--accent2)":it.tipo==="descuento"?"var(--green)":"var(--yellow)"}">${it.tipo==="cuotas"?"🔢":it.tipo==="descuento"?"🏷️":"⭐"}</span>
+          <div><div class="bank-ben-t">${it.titulo}</div>${it.detalle?`<div class="bank-ben-d">${it.detalle}</div>`:""}</div>
+        </div>`).join("")
+        : `<div class="bank-ben-empty">${fresh?"Sin beneficios destacados este mes":"Toca 'Buscar beneficios' para ver las promos"}</div>`}
+    </div>`;
+  }).join("");
+  box.innerHTML=`
+    <div class="bank-section">
+      <div class="bank-section-head">
+        <div class="bank-section-title">🏦 Beneficios de mis bancos</div>
+        <div style="display:flex;gap:6px">
+          <button class="bank-mini-btn" onclick="addBankCard()">＋ Tarjeta</button>
+          <button class="bank-mini-btn accent" onclick="fetchBankBenefits()">🔍 Buscar</button>
+        </div>
+      </div>
+      ${cardsHtml}
+      ${fresh?`<div class="bank-updated">Actualizado: ${new Date(ben.ts).toLocaleDateString("es-CL",{day:"numeric",month:"long"})}</div>`:""}
+    </div>`;
+}
+
+async function fetchBankBenefits(){
+  const cards=getBankCards();
+  if(!cards.length){ toast("Primero agrega una tarjeta","error"); return; }
+  if(!anthKey()){ toast("Configura la IA: toca tu avatar → 🤖 Configurar IA","error"); return; }
+  setLoading(true,"Buscando beneficios de tus bancos...");
+  try{
+    const lista=cards.map(c=>`${c.banco}${c.tarjeta?" "+c.tarjeta:""} (id: ${c.id})`).join("; ");
+    const prompt=`Busca en la web los beneficios y promociones VIGENTES este mes para estas tarjetas de crédito en Chile, región de Antofagasta cuando aplique: ${lista}.
+
+Para cada tarjeta busca: cuotas sin interés (cuántas y en qué comercios), descuentos vigentes (supermercados, restaurantes, farmacias, bencina, etc.), y beneficios exclusivos del banco. Enfócate en lo más relevante y útil.
+
+Cuando termines de buscar, responde SOLO con este JSON (sin texto adicional ni markdown):
+{"beneficios":[{"cardId":"el id que te di","items":[{"tipo":"cuotas","titulo":"12 cuotas sin interés","detalle":"en Falabella y Sodimac"},{"tipo":"descuento","titulo":"25% dcto restaurantes","detalle":"lunes y martes, tope $8.000"},{"tipo":"exclusivo","titulo":"Sala VIP aeropuerto","detalle":"2 accesos al año"}]}]}
+
+Usa exactamente los "id" que te pasé para cada tarjeta. tipo debe ser "cuotas", "descuento" o "exclusivo". Máximo 5 items por tarjeta, los más relevantes. Si no encuentras info confiable de una tarjeta, devuélvela con items vacíos.`;
+    const res=await fetchWithTimeout("https://api.anthropic.com/v1/messages",{
+      method:"POST",
+      headers:{"Content-Type":"application/json","x-api-key":anthKey(),"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
+      body:JSON.stringify({model:AI_MODEL,max_tokens:5000,
+        messages:[{role:"user",content:prompt}],
+        tools:[{type:"web_search_20250305",name:"web_search",max_uses:6}]})
+    }, 90000);
+    const data=await res.json();
+    if(data.error) throw new Error(data.error.message||JSON.stringify(data.error));
+    const text=(data.content||[]).filter(b=>b.type==="text").map(b=>b.text).join("\n");
+    if(!text.trim()) throw new Error("La IA no devolvió resultados. Reintenta.");
+    const parsed=parseAIJson(text);
+    if(!parsed.beneficios||!parsed.beneficios.length) throw new Error("No se encontraron beneficios. Reintenta.");
+    localStorage.setItem("lj6_bankben_"+currentUser.uid, JSON.stringify({ts:Date.now(),mes:today().slice(0,7),beneficios:parsed.beneficios}));
+    renderBankBenefits();
+    toast("🏦 Beneficios actualizados");
+  }catch(e){
+    toast("Beneficios: "+aiErrMsg(e),"error");
+  }
+  setLoading(false);
+}
+
 function renderDashboard() {
   if(!currentUser) return;
   renderResumenBanner();
   loadIndicators();
+  renderBankBenefits();
   const uid_ = currentUser.uid;
   const name_ = currentUser.displayName || currentUser.email.split("@")[0];
   const now = new Date();
@@ -927,6 +1033,12 @@ function renderFinanzas() {
   if(!currentUser) return;
   const uid_ = currentUser.uid;
   const allExp = STATE.expenses[uid_] || LS.get("exp_"+(currentUser.displayName||"user")) || [];
+  // Mostrar botón de borrar análisis si hay gastos importados por IA o estimado de tarjeta
+  const clearBtn=$("estadoClearBtn");
+  if(clearBtn){
+    const hasAI = allExp.some(e=>e.aiGenerated) || !!localStorage.getItem("lj6_card_"+uid_);
+    clearBtn.style.display = hasAI ? "inline-flex" : "none";
+  }
 
   // Chips: "Todos" consolida, luego deudas, luego gastos
   $("finCatChips").innerHTML =
@@ -1145,11 +1257,13 @@ Responde SOLO JSON compacto:
     const res=await fetchWithTimeout("https://api.anthropic.com/v1/messages",{
       method:"POST",
       headers:{"Content-Type":"application/json","x-api-key":anthKey(),"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
-      body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:1200,messages:[{role:"user",content:prompt}]})
+      body:JSON.stringify({model:AI_MODEL,max_tokens:1200,messages:[{role:"user",content:prompt}]})
     });
-    if(!res.ok) throw new Error("API "+res.status);
+    if(!res.ok){ const et=await res.text().catch(()=>""); throw new Error("API "+res.status+(res.status===401?" (clave inválida)":res.status===429?" (sin saldo o límite)":": "+et.slice(0,100))); }
     const data=await res.json();
-    const p=parseAIJson(data.content?.[0]?.text||"");
+    if(data.error) throw new Error(data.error.message||JSON.stringify(data.error));
+    const txt=(data.content||[]).filter(b=>b.type==="text").map(b=>b.text).join("\n");
+    const p=parseAIJson(txt);
     setLoading(false);
     $("insightsPanel").innerHTML=`
       <div class="results-block" style="border-color:var(--accent)">
@@ -1418,6 +1532,28 @@ function compressImage(file,maxDim,quality){
   });
 }
 
+// Borrar todos los gastos importados por IA + estimado de tarjeta guardado
+async function clearAIExpenses(){
+  const uid_=currentUser.uid;
+  const aiExp=(STATE.expenses[uid_]||[]).filter(e=>e.aiGenerated);
+  const hasCard=!!localStorage.getItem("lj6_card_"+uid_);
+  if(!aiExp.length && !hasCard){ toast("No hay datos de estado de cuenta para borrar"); return; }
+  const total=aiExp.reduce((a,e)=>a+e.amount,0);
+  if(!confirm(`¿Borrar el análisis del estado de cuenta?\n\n· ${aiExp.length} gastos importados por IA (${clp(total)})\n${hasCard?"· El estimado de tarjeta guardado\n":""}\nTus gastos ingresados manualmente NO se tocan. No se puede deshacer.`)) return;
+  setLoading(true,"Borrando análisis...");
+  for(const e of aiExp){ await fsDel(`users/${uid_}/expenses/${e.id}`); }
+  STATE.expenses[uid_]=(STATE.expenses[uid_]||[]).filter(e=>!e.aiGenerated);
+  LS.set("exp_"+(currentUser.displayName||"user"),STATE.expenses[uid_]);
+  localStorage.removeItem("lj6_card_"+uid_);
+  // Limpiar la vista de resultados
+  const r=$("estadoResults"); if(r){ r.style.display="none"; r.innerHTML=""; }
+  const panel=$("estadoPanel"); if(panel) panel.style.display="none";
+  estadoCuentaText=""; estadoImages=[];
+  setLoading(false);
+  renderFinanzas(); renderDashboard();
+  toast(`🗑️ Análisis borrado: ${aiExp.length} gastos eliminados`);
+}
+
 async function analyzeEstadoCuenta() {
   if(!estadoCuentaText.trim() && !estadoImages.length){ toast("Primero carga tu estado de cuenta","error"); return; }
   if(!anthKey()){ toast("Configura la IA: toca tu avatar → 🤖 Configurar IA","error"); return; }
@@ -1432,14 +1568,15 @@ Analiza y:
 2. Clasifica cada una en: ${PRIVATE_CATS.map(c=>c.label).join(", ")}
 3. Calcula el total gastado por categoría
 4. ESTIMA EL PAGO DE TARJETA DE CRÉDITO a fin de mes: identifica el cupo facturado/monto facturado del período, el pago mínimo y el pago total facturado si aparecen. Si es una tarjeta con cuotas, considera solo la cuota del mes. Si no hay un total explícito, suma los cargos del período como estimación y acláralo.
-5. Identifica patrones o cobros preocupantes
-6. Da 3 recomendaciones concretas
+5. PROYECCIÓN DE CUOTAS FUTURAS: identifica las compras en cuotas y calcula cuánto se pagará en cada uno de los próximos meses SOLO por cuotas ya contraídas. Devuelve el nombre del mes, año y monto.
+6. Identifica patrones o cobros preocupantes y da 3 recomendaciones concretas
 
 Responde SOLO en JSON sin texto extra:
 {
   "transactions": [{"desc":"...","amount":12000,"date":"2026-06-15","cat":"bencina","type":"cargo"}],
   "summary": {"totalGastos":0,"totalAbonos":0,"categorias":{"bencina":0}},
-  "tarjeta": {"totalFacturado":0,"pagoMinimo":0,"fechaVencimiento":"2026-07-30","estimadoAFinDeMes":0,"esEstimacion":true,"detalle":"Explica brevemente cómo se calculó el estimado"},
+  "tarjeta": {"totalFacturado":0,"pagoMinimo":0,"fechaVencimiento":"2026-07-30","estimadoAFinDeMes":0,"esEstimacion":true,"detalle":"..."},
+  "proyeccionMeses": [{"mes":"Julio","anio":2026,"monto":1018903,"detalle":"cuotas de viajes"},{"mes":"Agosto","anio":2026,"monto":472045,"detalle":"..."}],
   "insights": ["...","..."],
   "recommendations": ["...","...","..."],
   "alertas": ["..."]
@@ -1454,7 +1591,7 @@ ${estadoCuentaText.trim()?"ESTADO DE CUENTA (texto):\n"+estadoCuentaText.slice(0
     const res=await fetchWithTimeout("https://api.anthropic.com/v1/messages",{
       method:"POST",
       headers:{"Content-Type":"application/json","x-api-key":anthKey(),"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
-      body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:6000,messages:[{role:"user",content}]})
+      body:JSON.stringify({model:AI_MODEL,max_tokens:6000,messages:[{role:"user",content}]})
     });
     if(!res.ok){ const et=await res.text().catch(()=>""); throw new Error("API "+res.status+(res.status===401?" — revisa tu clave de IA":res.status===400&&/image/i.test(et)?" — imagen no válida":"")); }
     const data=await res.json();
@@ -1479,6 +1616,8 @@ ${estadoCuentaText.trim()?"ESTADO DE CUENTA (texto):\n"+estadoCuentaText.slice(0
     if(parsed.tarjeta && (parsed.tarjeta.estimadoAFinDeMes||parsed.tarjeta.totalFacturado)){
       localStorage.setItem("lj6_card_"+currentUser.uid, JSON.stringify({...parsed.tarjeta, ts:Date.now()}));
     }
+    // Guardar la proyección de meses futuros para poder agregarla al historial
+    window._lastProyeccion = parsed.proyeccionMeses || [];
     estadoImages=[]; // liberar memoria
     renderFinanzas(); renderDashboard();
   } catch(err){
@@ -1503,6 +1642,7 @@ function showEstadoResults(parsed) {
       ${tj.totalFacturado?`<div class="rb-row"><span>Total facturado</span><span class="neg">${clp(tj.totalFacturado)}</span></div>`:""}
       ${tj.pagoMinimo?`<div class="rb-row"><span>Pago mínimo</span><span>${clp(tj.pagoMinimo)}</span></div>`:""}
       ${tj.detalle?`<div class="card-detail">ℹ️ ${tj.detalle}</div>`:""}
+      <button class="btn btn-green btn-full" style="margin-top:10px" onclick="marcarTarjetaPagada()">✅ Ya pagué esta tarjeta</button>
     </div>`:"";
   r.innerHTML=`
     ${tarjetaBlock}
@@ -1515,8 +1655,67 @@ function showEstadoResults(parsed) {
     ${ins?`<div class="results-block"><div class="rb-title">🔍 Insights</div>${ins}</div>`:""}
     ${ale?`<div class="results-block" style="border-color:var(--red)"><div class="rb-title" style="color:var(--red)">⚠️ Alertas</div>${ale}</div>`:""}
     ${rec?`<div class="results-block" style="border-color:var(--green)"><div class="rb-title" style="color:var(--green)">💡 Recomendaciones</div>${rec}</div>`:""}
-    <div style="font-size:11px;color:var(--text3);margin-top:8px">${(parsed.transactions||[]).length} transacciones importadas a tu perfil 🤖</div>`;
+    ${(parsed.proyeccionMeses&&parsed.proyeccionMeses.length)?`
+    <div class="results-block" style="border-color:var(--accent)">
+      <div class="rb-title" style="color:var(--accent)">📅 Cuotas futuras — agrégalas a tu historial</div>
+      <div style="font-size:11px;color:var(--text2);margin-bottom:10px">Toca cada mes para registrarlo como deuda personal en tu proyección. Así ves cómo bajará tu deuda mes a mes.</div>
+      ${parsed.proyeccionMeses.map((p,i)=>`
+        <div class="proy-mes-row">
+          <div style="flex:1">
+            <div style="font-size:13px;font-weight:700">${p.mes} ${p.anio||""}</div>
+            <div style="font-size:10.5px;color:var(--text3)">${p.detalle||"cuotas del período"}</div>
+          </div>
+          <div style="font-size:14px;font-weight:800;color:var(--red);margin-right:8px">${clp(p.monto)}</div>
+          <button class="btn btn-accent btn-sm" onclick="addProyeccionMes(${i})">＋ Agregar</button>
+        </div>`).join("")}
+      <button class="btn btn-green btn-full" style="margin-top:10px" onclick="addAllProyeccion()">📅 Agregar todos los meses de una vez</button>
+    </div>`:""}
+    <div style="font-size:11px;color:var(--text3);margin-top:8px">${(parsed.transactions||[]).length} transacciones importadas a tu perfil 🤖</div>
+    <button class="btn btn-red btn-full" style="margin-top:12px" onclick="clearAIExpenses()">🗑️ Borrar este análisis e importación</button>`;
   r.style.display="block";
+}
+
+const MESES_NUM={enero:0,febrero:1,marzo:2,abril:3,mayo:4,junio:5,julio:6,agosto:7,septiembre:8,setiembre:8,octubre:9,noviembre:10,diciembre:11};
+
+// Marcar la tarjeta como pagada: quita el estimado de la proyección del mes
+function marcarTarjetaPagada(){
+  const uid_=currentUser.uid;
+  let card_=null;
+  try{ card_=JSON.parse(localStorage.getItem("lj6_card_"+uid_)||"null"); }catch(e){}
+  const monto=card_?(card_.estimadoAFinDeMes||card_.totalFacturado||0):0;
+  if(!confirm(`¿Marcar la tarjeta como pagada?\n\nSe quitará el estimado de ${clp(monto)} de tu proyección del mes, y el resto de tus cuotas futuras quedará como lo que te falta pagar.`)) return;
+  localStorage.removeItem("lj6_card_"+uid_);
+  const btn=$("estadoClearBtn");
+  renderFinanzas(); renderDashboard();
+  toast(`✅ Tarjeta marcada como pagada — ${clp(monto)} descontado de tu proyección`);
+}
+
+// Agregar un mes proyectado como deuda personal en el historial
+async function addProyeccionMes(idx){
+  const p=(window._lastProyeccion||[])[idx];
+  if(!p||!p.monto){ toast("Sin monto para agregar","error"); return; }
+  const uid_=currentUser.uid;
+  const mesNum=MESES_NUM[String(p.mes||"").toLowerCase()];
+  const anio=p.anio||new Date().getFullYear();
+  const dateStr=(mesNum!==undefined)?`${anio}-${String(mesNum+1).padStart(2,"0")}-15`:today();
+  if(!STATE.expenses[uid_]) STATE.expenses[uid_]=[];
+  const newExp={desc:`Cuota tarjeta ${p.mes}${p.detalle?" · "+p.detalle:""}`,amount:Math.abs(p.monto),cat:"tarjeta",date:dateStr,addedBy:uid_,aiGenerated:true};
+  const newId=await fsAdd(`users/${uid_}/expenses`,newExp);
+  STATE.expenses[uid_].unshift({id:newId,...newExp});
+  LS.set("exp_"+(currentUser.displayName||"user"),STATE.expenses[uid_]);
+  renderFinanzas(); renderDashboard();
+  toast(`✅ ${p.mes}: ${clp(p.monto)} agregado a tu historial`);
+}
+
+async function addAllProyeccion(){
+  const list=window._lastProyeccion||[];
+  if(!list.length) return;
+  const total=list.reduce((a,p)=>a+(p.monto||0),0);
+  if(!confirm(`¿Agregar ${list.length} meses de cuotas futuras a tu historial?\nTotal: ${clp(total)}\n\nCada uno queda en su mes para tu proyección.`)) return;
+  setLoading(true,"Agregando cuotas al historial...");
+  for(let i=0;i<list.length;i++){ await addProyeccionMes(i); }
+  setLoading(false);
+  toast(`📅 ${list.length} meses agregados a tu proyección`);
 }
 
 // ── INSIGHTS IA (análisis de hábitos) ──
@@ -1547,11 +1746,13 @@ Responde SOLO en JSON:
     const res=await fetchWithTimeout("https://api.anthropic.com/v1/messages",{
       method:"POST",
       headers:{"Content-Type":"application/json","x-api-key":anthKey(),"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
-      body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:1500,messages:[{role:"user",content:prompt}]})
+      body:JSON.stringify({model:AI_MODEL,max_tokens:1500,messages:[{role:"user",content:prompt}]})
     });
-    if(!res.ok) throw new Error("API "+res.status);
+    if(!res.ok){ const et=await res.text().catch(()=>""); throw new Error("API "+res.status+(res.status===401?" (clave inválida)":res.status===429?" (sin saldo o límite)":": "+et.slice(0,100))); }
     const data=await res.json();
-    const parsed=parseAIJson(data.content?.[0]?.text||"");
+    if(data.error) throw new Error(data.error.message||JSON.stringify(data.error));
+    const txt=(data.content||[]).filter(b=>b.type==="text").map(b=>b.text).join("\n");
+    const parsed=parseAIJson(txt);
     STATE.insights=parsed;
     LS.set("insights_"+uid_,parsed);
     setLoading(false);
@@ -2011,7 +2212,7 @@ async function analyzeImage(b64data,mime){
     const res=await fetchWithTimeout("https://api.anthropic.com/v1/messages",{
       method:"POST",
       headers:{"Content-Type":"application/json","x-api-key":anthKey(),"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
-      body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:2000,messages:[{role:"user",content:[
+      body:JSON.stringify({model:AI_MODEL,max_tokens:2000,messages:[{role:"user",content:[
         {type:"image",source:{type:"base64",media_type:apiMime,data:b64}},
         {type:"text",text:"Analiza esta boleta de supermercado chileno. Extrae TODOS los productos. Responde SOLO JSON sin texto extra:\n{\"store\":\"tienda\",\"date\":\"dd/mm/aa\",\"items\":[{\"name\":\"producto\",\"qty\":1,\"unit\":\"un\",\"price\":1990}]}"}
       ]}]})
@@ -2498,31 +2699,33 @@ async function fetchOfertas(force){
   if(!anthKey()){ toast("Configura la IA: toca tu avatar → 🤖 Configurar IA","error"); return; }
   setLoading(true,"Buscando ofertas en supermercados de Antofagasta...");
   try{
-    const prompt=`Busca en la web las ofertas y promociones VIGENTES ESTA SEMANA en supermercados de Antofagasta, Chile: Líder, Jumbo, Santa Isabel, Unimarc y Tottus. Prioriza alimentos: carnes, lácteos, abarrotes, frutas/verduras, bebidas y productos de limpieza. Incluye solo ofertas con precio concreto en pesos chilenos.
+    const prompt=`Busca en la web ofertas y promociones de supermercados en Antofagasta, Chile (Líder, Jumbo, Santa Isabel, Unimarc, Tottus). Prioriza alimentos con precio concreto en pesos chilenos.
 
-Responde SOLO con JSON válido, sin texto adicional ni markdown:
-{"ofertas":[{"super":"Líder","producto":"Posta rosada al vacío kg","precio":8990,"precioNormal":11990,"descuento":"25%","categoria":"Carnes","detalle":"válido hasta domingo"}]}
+Cuando termines de buscar, responde SOLO con este JSON (sin texto adicional, sin markdown):
+{"ofertas":[{"super":"Líder","producto":"Posta rosada kg","precio":8990,"precioNormal":11990,"descuento":"25%","categoria":"Carnes","detalle":"hasta domingo"}]}
 
-Usa exactamente estos nombres de supermercado: Líder, Jumbo, Santa Isabel, Unimarc, Tottus. Entre 10 y 25 ofertas en total. Si de algún supermercado no encuentras nada confiable, omítelo.`;
+Nombres exactos: Líder, Jumbo, Santa Isabel, Unimarc, Tottus. Entre 8 y 20 ofertas. Si no encuentras ofertas reales confiables, igual entrega estimaciones de precios habituales de esos supermercados marcando detalle:"precio referencial".`;
     const res=await fetchWithTimeout("https://api.anthropic.com/v1/messages",{
       method:"POST",
       headers:{"Content-Type":"application/json","x-api-key":anthKey(),"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
-      body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:5000,
+      body:JSON.stringify({model:AI_MODEL,max_tokens:6000,
         messages:[{role:"user",content:prompt}],
         tools:[{type:"web_search_20250305",name:"web_search",max_uses:5}]})
-    });
+    }, 90000);
     const data=await res.json();
-    if(data.error) throw new Error(data.error.message||"Error de API");
-    const text=(data.content||[]).map(b=>b.type==="text"?b.text:"").join("");
+    if(data.error) throw new Error(data.error.message||JSON.stringify(data.error));
+    // Extraer texto de TODOS los bloques de texto (web search intercala bloques)
+    const text=(data.content||[]).filter(b=>b.type==="text").map(b=>b.text).join("\n");
+    if(!text.trim()) throw new Error("La IA no devolvió texto (posible límite de búsqueda). Reintenta.");
     const parsed=parseAIJson(text);
     const ofertas=(parsed.ofertas||[]).filter(o=>o.producto&&o.precio);
-    if(!ofertas.length) throw new Error("No se encontraron ofertas esta vez, intenta de nuevo");
+    if(!ofertas.length) throw new Error("No se encontraron ofertas con precio. Reintenta.");
     LS.set("ofertas",{ts:Date.now(),week:weekKey(),data:ofertas});
     ofSuperFilter=null;
     renderOfertas();
     toast(`🏷️ ${ofertas.length} ofertas encontradas`);
   }catch(e){
-    toast("No se pudieron cargar ofertas: "+aiErrMsg(e),"error");
+    toast("Ofertas: "+aiErrMsg(e),"error");
     renderOfertas();
   }
   setLoading(false);
@@ -2927,6 +3130,34 @@ img{display:block;max-width:100%}
 .quick-months{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
 .qm-chip{font-size:12px;font-weight:700;background:var(--accentbg);color:var(--accent2);border:1px solid var(--privbr);border-radius:14px;padding:5px 13px;cursor:pointer;-webkit-tap-highlight-color:transparent;user-select:none}
 .qm-chip:active{background:var(--accent);color:#fff}
+.btn-add-gasto{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;border:none;border-radius:22px;padding:11px 20px;font-size:14px;font-weight:800;cursor:pointer;box-shadow:0 4px 14px rgba(91,84,240,.35);-webkit-tap-highlight-color:transparent;white-space:nowrap;font-family:"Inter",sans-serif}
+.btn-add-gasto:active{transform:scale(.95)}
+.fin-ai-row{display:flex;gap:8px;padding:0 18px 14px}
+.fin-ai-btn{flex:1;background:var(--sur);border:1px solid var(--border2);border-radius:14px;padding:11px;font-size:12.5px;font-weight:700;color:var(--text2);cursor:pointer;-webkit-tap-highlight-color:transparent;box-shadow:var(--sh);font-family:"Inter",sans-serif}
+.fin-ai-btn:active{background:var(--accentbg);color:var(--accent2)}
+.proy-mes-row{display:flex;align-items:center;gap:8px;padding:9px 0;border-top:1px solid var(--border)}
+.proy-mes-row:first-of-type{border-top:none}
+/* Beneficios bancarios */
+.bank-setup{display:flex;align-items:center;gap:12px;margin:0 18px 14px;padding:14px 16px;background:linear-gradient(135deg,var(--accentbg),transparent);border:1px dashed var(--privbr);border-radius:var(--r-l);cursor:pointer;-webkit-tap-highlight-color:transparent}
+.bank-setup-t{font-size:13px;font-weight:800}
+.bank-setup-s{font-size:11px;color:var(--text2);margin-top:2px}
+.bank-setup-btn{width:34px;height:34px;border-radius:50%;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:700;flex-shrink:0}
+.bank-section{margin:0 18px 14px;background:var(--sur);border:1px solid var(--border);border-radius:var(--r-l);padding:14px 16px;box-shadow:var(--sh)}
+.bank-section-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;gap:8px}
+.bank-section-title{font-size:13px;font-weight:800}
+.bank-mini-btn{background:var(--bg2);border:1px solid var(--border2);border-radius:14px;padding:5px 11px;font-size:11px;font-weight:700;color:var(--text2);cursor:pointer;-webkit-tap-highlight-color:transparent;white-space:nowrap;font-family:"Inter",sans-serif}
+.bank-mini-btn.accent{background:var(--accent);color:#fff;border-color:var(--accent)}
+.bank-card{border-top:1px solid var(--border);padding:11px 0}
+.bank-card:first-of-type{border-top:none}
+.bank-card-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+.bank-card-name{font-size:13px;font-weight:800;color:var(--accent2)}
+.bank-card-x{background:none;border:none;color:var(--text3);font-size:14px;cursor:pointer;padding:2px 6px}
+.bank-benefit{display:flex;gap:9px;align-items:flex-start;padding:6px 0}
+.bank-ben-tag{width:26px;height:26px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:13px;flex-shrink:0}
+.bank-ben-t{font-size:12.5px;font-weight:700;line-height:1.3}
+.bank-ben-d{font-size:11px;color:var(--text2);margin-top:1px}
+.bank-ben-empty{font-size:11.5px;color:var(--text3);padding:4px 0}
+.bank-updated{font-size:10px;color:var(--text3);text-align:right;margin-top:8px}
 .sheet-close-btn{background:var(--bg2);border:1px solid var(--border2);border-radius:20px;padding:7px 15px;font-size:13px;font-weight:700;color:var(--text2);cursor:pointer;-webkit-tap-highlight-color:transparent;font-family:"Inter",sans-serif}
 .sheet-close-btn:active{background:var(--redbg);color:var(--red)}
 .sheet-back-btn{background:var(--bg2);border:1px solid var(--border2);border-radius:20px;padding:8px 16px;font-size:13px;font-weight:700;color:var(--accent);cursor:pointer;-webkit-tap-highlight-color:transparent;font-family:"Inter",sans-serif}
@@ -3331,6 +3562,7 @@ img{display:block;max-width:100%}
       </div>
       <div class="context-ticker" id="contextTicker"></div>
       <div id="reminderBanner"></div>
+      <div id="bankBenefits"></div>
       <div class="stats-grid" id="statsGrid"></div>
       <div class="donut-section">
         <div class="donut-title">Gastos del hogar este mes</div>
@@ -3361,13 +3593,14 @@ img{display:block;max-width:100%}
     <div class="page" id="page-finanzas">
       <div class="sec-header">
         <div><div class="sec-title">Mis Finanzas</div><div class="sec-subtitle">Solo tú puedes ver esto</div></div>
-        <div style="display:flex;gap:8px">
-          <div class="sec-action" onclick="runMonthSummary()">📅 Resumen</div>
-          <div class="sec-action" onclick="runInsights()">🤖 Insights</div>
-          <div class="sec-action" onclick="openAddExpense()">+ Gasto</div>
-        </div>
+        <button class="btn-add-gasto" onclick="openAddExpense()">＋ Gasto</button>
       </div>
       <div class="priv-indicator">🔒 Datos privados — solo visibles en tu sesión</div>
+
+      <div class="fin-ai-row">
+        <button class="fin-ai-btn" onclick="runMonthSummary()">📅 Resumen del mes</button>
+        <button class="fin-ai-btn" onclick="runInsights()">🤖 Insights IA</button>
+      </div>
 
       <div class="fin-donut-card">
         <div class="donut-title">Distribución de mis gastos</div>
@@ -3397,7 +3630,8 @@ img{display:block;max-width:100%}
       <div class="estado-section">
         <div class="estado-header">
           <span style="font-size:13px;font-weight:700">💳 Estado de cuenta / Tarjeta<br><span style="font-size:10px;font-weight:600;color:var(--text3)">Sube fotos o PDF — estima tu pago a fin de mes</span></span>
-          <div style="display:flex;gap:7px">
+          <div style="display:flex;gap:7px;align-items:center">
+            <button class="btn btn-red btn-sm" id="estadoClearBtn" style="display:none" onclick="clearAIExpenses()" title="Borrar análisis importado">🗑️</button>
             <label class="btn btn-ghost btn-sm" style="cursor:pointer">
               📁 Archivo/Foto <input type="file" accept=".pdf,.csv,.txt,.xls,.xlsx,image/*" multiple style="display:none" onchange="loadEstadoCuenta(event)">
             </label>
@@ -3557,7 +3791,7 @@ img{display:block;max-width:100%}
         </div>
 
         <button class="btn btn-red btn-full" style="margin-top:16px" onclick="doLogout()">↩️ Cerrar sesión</button>
-        <div style="text-align:center;font-size:10px;color:var(--text3);margin-top:14px">ListaJuntos v11</div>
+        <div style="text-align:center;font-size:10px;color:var(--text3);margin-top:14px">ListaJuntos v15</div>
       </div>
     </div>
 
