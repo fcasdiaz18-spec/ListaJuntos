@@ -1257,6 +1257,7 @@ function openAddExpense(){
   $("expSubmitBtn").textContent="Registrar gasto";
   $("expDesc").value=""; $("expAmount").value=""; $("expDate").value=today();
   $("expRepeat").value="1"; $("expRepeatWrap").style.display="block";
+  if($("expCustomMonths")){ $("expCustomMonths").value=""; $("expCustomMonths").style.display="none"; }
   sheetExpCat=null; renderExpSheetCats();
   openSheet("addExpense");
 }
@@ -1298,7 +1299,10 @@ async function addExpense() {
   }
 
   // Modo creación (con recurrencia opcional)
-  const repeat=parseInt($("expRepeat").value)||1;
+  const repSel=$("expRepeat").value;
+  let repeat = repSel==="custom" ? (parseInt($("expCustomMonths").value)||1) : (parseInt(repSel)||1);
+  repeat=Math.max(1,Math.min(600,repeat));
+  if(repeat>1 && !confirm(`¿Crear ${repeat} gastos mensuales de ${clp(amount)} c/u?\nTotal: ${clp(amount*repeat)}`)) return;
   const groupId=repeat>1?uid():null;
   const [by,bm,bd]=date.split("-").map(Number);
   setLoading(repeat>1,`Creando ${repeat} meses...`);
@@ -2334,6 +2338,11 @@ function toggleCustomMonths(){
   const inp=$("dCustomMonths");
   if(inp) inp.style.display = sel==="custom" ? "block" : "none";
 }
+function toggleExpCustomMonths(){
+  const sel=$("expRepeat").value;
+  const inp=$("expCustomMonths");
+  if(inp) inp.style.display = sel==="custom" ? "block" : "none";
+}
 
 async function addDebt(){
   const desc=  $("dDesc").value.trim();
@@ -2921,6 +2930,9 @@ img{display:block;max-width:100%}
 .stmt-line{display:flex;justify-content:space-between;font-size:13px;font-weight:600;margin-bottom:6px}
 .stmt-note{font-size:10.5px;color:var(--text3);margin-top:8px;padding-top:8px;border-top:1px solid var(--border);line-height:1.4}
 .sheet-topbar{display:flex;align-items:center;margin-bottom:14px}
+.sheet-close-row{display:flex;justify-content:flex-end;margin-bottom:6px}
+.sheet-close-btn{background:var(--bg2);border:1px solid var(--border2);border-radius:20px;padding:7px 15px;font-size:13px;font-weight:700;color:var(--text2);cursor:pointer;-webkit-tap-highlight-color:transparent;font-family:"Inter",sans-serif}
+.sheet-close-btn:active{background:var(--redbg);color:var(--red)}
 .sheet-back-btn{background:var(--bg2);border:1px solid var(--border2);border-radius:20px;padding:8px 16px;font-size:13px;font-weight:700;color:var(--accent);cursor:pointer;-webkit-tap-highlight-color:transparent;font-family:"Inter",sans-serif}
 .sheet-back-btn:active{background:var(--accentbg)}
 
@@ -2992,10 +3004,10 @@ img{display:block;max-width:100%}
 
 /* ── SCROLL + TABS ── */
 .scroll-area{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior-y:contain;padding-bottom:calc(80px + var(--safe-b));scroll-behavior:smooth}
-.tab-bar{position:fixed;bottom:0;left:0;right:0;z-index:100;background:var(--nav-bg);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);border-top:1px solid var(--border);display:flex;align-items:center;padding:0 6px;padding-bottom:max(var(--safe-b),6px);height:calc(64px + max(var(--safe-b),0px))}
+.tab-bar{position:fixed;bottom:0;left:0;right:0;z-index:100;background:var(--nav-bg);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);border-top:1px solid var(--border);display:flex;align-items:center;padding:0 4px;padding-bottom:max(var(--safe-b),5px);height:calc(58px + max(var(--safe-b),0px))}
 [data-theme="light"] .tab-bar{background:rgba(240,242,250,.95)}
-.tab-item{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;padding:7px 3px;cursor:pointer;-webkit-tap-highlight-color:transparent;transition:all .18s;position:relative;user-select:none}
-.tab-icon{font-size:19px;transition:transform .2s cubic-bezier(.34,1.56,.64,1)}
+.tab-item{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;padding:6px 2px;cursor:pointer;-webkit-tap-highlight-color:transparent;transition:all .18s;position:relative;user-select:none}
+.tab-icon{font-size:18px;transition:transform .2s cubic-bezier(.34,1.56,.64,1)}
 .tab-label{font-size:9px;font-weight:600;color:var(--text3);letter-spacing:.01em;transition:color .18s;white-space:nowrap;max-width:100%;overflow:hidden;text-overflow:ellipsis}
 .tab-item.active .tab-icon{transform:scale(1.15)}
 .tab-item.active .tab-label{color:var(--accent2);font-weight:700}
@@ -3078,8 +3090,11 @@ img{display:block;max-width:100%}
 .fin-bar-label{font-size:9px;color:var(--text3);font-weight:500;margin-bottom:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .fin-bar-track{height:4px;background:var(--sur);border-radius:2px;overflow:hidden}
 .fin-bar-fill{height:100%;border-radius:2px}
-.cat-chips{display:flex;gap:6px;flex-wrap:wrap;padding:0 18px 14px}
-.cat-chip{display:flex;align-items:center;gap:4px;background:var(--bg2);border:1.5px solid var(--border2);border-radius:20px;padding:5px 11px;font-size:11px;font-weight:600;color:var(--text2);cursor:pointer;transition:all .15s;white-space:nowrap}
+.cat-chips{display:grid;grid-template-columns:1fr 1fr;gap:7px;padding:0 18px 14px}
+.cat-chips-scroll{display:flex;gap:7px;overflow-x:auto;padding:0 18px 14px;-webkit-overflow-scrolling:touch}
+.cat-chips-scroll::-webkit-scrollbar{display:none}
+.cat-chips-scroll .cat-chip{flex-shrink:0}
+.cat-chip{display:flex;align-items:center;gap:5px;background:var(--bg2);border:1.5px solid var(--border2);border-radius:12px;padding:9px 11px;font-size:11.5px;font-weight:600;color:var(--text2);cursor:pointer;transition:all .15s;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .cat-chip:hover{border-color:var(--accent);color:var(--text)}
 .cat-chip.sel{background:var(--accentbg);border-color:var(--accent);color:var(--accent2)}
 .expense-list{padding:0 18px;display:flex;flex-direction:column;gap:9px}
@@ -3408,7 +3423,7 @@ img{display:block;max-width:100%}
           <input class="exp-search" id="expSearch" type="text" placeholder="🔍 Buscar gasto..." oninput="renderFinanzas()">
           <button class="btn btn-ghost btn-sm" onclick="exportExpensesCSV()">📤 CSV</button>
         </div>
-        <div class="cat-chips" id="finCatChips"></div>
+        <div class="cat-chips-scroll" id="finCatChips"></div>
       </div>
       <div class="expense-list" id="expenseList"></div>
       <div style="height:18px"></div>
@@ -3594,6 +3609,7 @@ img{display:block;max-width:100%}
 <div class="overlay" id="sheet-addExpense" onclick="closeSheetIfBack(event,'addExpense')">
   <div class="sheet">
     <div class="sheet-handle" onclick="closeSheet('addExpense')"></div>
+    <div class="sheet-close-row"><button class="sheet-close-btn" onclick="closeSheet('addExpense')">✕ Cerrar</button></div>
     <div class="sheet-title" id="expSheetTitle">Registrar gasto personal</div>
     <div class="priv-indicator" style="margin:0 0 16px">🔒 Solo tú verás este gasto</div>
     <div style="display:flex;flex-direction:column;gap:12px">
@@ -3604,12 +3620,16 @@ img{display:block;max-width:100%}
       </div>
       <div class="field-group" id="expRepeatWrap">
         <label>🔁 Repetir a futuro (opcional)</label>
-        <select class="field-input" id="expRepeat">
+        <select class="field-input" id="expRepeat" onchange="toggleExpCustomMonths()">
           <option value="1">Solo esta vez</option>
           <option value="3">Próximos 3 meses</option>
           <option value="6">Próximos 6 meses</option>
           <option value="12">Próximos 12 meses</option>
+          <option value="24">Próximos 24 meses (2 años)</option>
+          <option value="36">Próximos 36 meses (3 años)</option>
+          <option value="custom">✏️ Cantidad exacta de meses...</option>
         </select>
+        <input class="field-input" id="expCustomMonths" type="number" min="1" max="600" placeholder="Ej: 48 meses (4 años)" style="display:none;margin-top:8px">
         <div style="font-size:10.5px;color:var(--text3);margin-top:4px">Para suscripciones, gym, arriendo y gastos fijos mensuales</div>
       </div>
       <div class="field-group">
@@ -3625,6 +3645,7 @@ img{display:block;max-width:100%}
 <div class="overlay" id="sheet-addInv" onclick="closeSheetIfBack(event,'addInv')">
   <div class="sheet">
     <div class="sheet-handle" onclick="closeSheet('addInv')"></div>
+    <div class="sheet-close-row"><button class="sheet-close-btn" onclick="closeSheet('addInv')">✕ Cerrar</button></div>
     <div class="sheet-title">Agregar al inventario</div>
     <div style="display:flex;flex-direction:column;gap:12px">
       <div class="field-group">
@@ -3668,6 +3689,7 @@ img{display:block;max-width:100%}
 <div class="overlay" id="sheet-addDebt" onclick="closeSheetIfBack(event,'addDebt')">
   <div class="sheet">
     <div class="sheet-handle" onclick="closeSheet('addDebt')"></div>
+    <div class="sheet-close-row"><button class="sheet-close-btn" onclick="closeSheet('addDebt')">✕ Cerrar</button></div>
     <div class="sheet-title">Registrar gasto del hogar</div>
     <div class="shared-indicator" style="margin:0 0 14px">👥 Felipe y Melisa verán esto en tiempo real</div>
     <div style="display:flex;flex-direction:column;gap:12px">
