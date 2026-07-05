@@ -760,10 +760,14 @@ function renderProjection(allExp){
   // Balance del hogar desde mi perspectiva (+ me deben / − debo)
   const bal=computeDebtBalances(STATE.debts);
   const myNet=isFel(currentUser.displayName)?bal.felipeNet:-bal.felipeNet;
-  const proyectado=income-gastoMes+myNet;
+  // Estimado de tarjeta de crédito (del último análisis de estado de cuenta)
+  let card_=null;
+  try{ card_=JSON.parse(localStorage.getItem("lj6_card_"+currentUser.uid)||"null"); }catch(e){}
+  const tarjeta=card_?(card_.estimadoAFinDeMes||card_.totalFacturado||0):0;
+  const proyectado=income-gastoMes+myNet-tarjeta;
   const dPay=daysToPayday();
   const diario=dPay>0?Math.round(Math.max(proyectado,0)/dPay):0;
-  const pct=Math.min(100,Math.round(gastoMes/income*100));
+  const pct=Math.min(100,Math.round((gastoMes+tarjeta)/income*100));
   card.innerHTML=`
     <div class="proj-head">
       <div>📈 Proyección del mes <span class="proj-edit" onclick="setIncome()">✏️ editar ingreso</span></div>
@@ -772,11 +776,12 @@ function renderProjection(allExp){
     <div class="proj-grid">
       <div class="proj-cell"><div class="proj-l">Ingreso mensual</div><div class="proj-v">${clp(income)}</div></div>
       <div class="proj-cell"><div class="proj-l">Gastado este mes</div><div class="proj-v" style="color:var(--red)">−${clp(gastoMes)}</div></div>
-      <div class="proj-cell"><div class="proj-l">Balance hogar</div><div class="proj-v" style="color:${myNet>=0?"var(--green)":"var(--red)"}">${myNet>=0?"+":"−"}${clp(Math.abs(Math.round(myNet)))}</div></div>
+      ${tarjeta?`<div class="proj-cell"><div class="proj-l">💳 Tarjeta a pagar</div><div class="proj-v" style="color:var(--red)">−${clp(tarjeta)}</div></div>`:`<div class="proj-cell"><div class="proj-l">Balance hogar</div><div class="proj-v" style="color:${myNet>=0?"var(--green)":"var(--red)"}">${myNet>=0?"+":"−"}${clp(Math.abs(Math.round(myNet)))}</div></div>`}
       <div class="proj-cell hl"><div class="proj-l">Terminarías con</div><div class="proj-v" style="color:${proyectado>=0?"var(--green)":"var(--red)"}">${proyectado<0?"−":""}${clp(Math.abs(Math.round(proyectado)))}</div></div>
     </div>
     <div class="proj-bar"><div class="proj-bar-fill" style="width:${pct}%;background:${pct>85?"var(--red)":pct>60?"var(--yellow)":"var(--green)"}"></div></div>
-    <div class="proj-note">${pct}% del ingreso gastado${dPay>0&&proyectado>0?` · puedes gastar ~${clp(diario)}/día hasta el sueldo`:""}${proyectado<0?" · ⚠️ proyección negativa — revisa tus gastos":""}</div>`;
+    <div class="proj-note">${pct}% del ingreso comprometido${tarjeta?` · incluye tarjeta ${clp(tarjeta)}`:""}${dPay>0&&proyectado>0?` · ~${clp(diario)}/día hasta el sueldo`:""}${proyectado<0?" · ⚠️ proyección negativa — revisa tus gastos":""}</div>
+    ${tarjeta?'<div class="proj-note" style="margin-top:4px;color:var(--text3)">💳 Estimado desde tu último estado de cuenta analizado</div>':""}`;
 }
 
 // ── Donut interactivo de gastos personales ──
@@ -859,79 +864,114 @@ async function deleteExpense(eid) {
 
 // ── ESTADO DE CUENTA — análisis IA ──
 let estadoCuentaText = "";
+let estadoImages=[]; // imágenes en base64 para enviar a la IA visión
+
 async function loadEstadoCuenta(e) {
-  const file = e.target.files[0]; if(!file) return;
+  const files=[...e.target.files]; if(!files.length) return;
   setLoading(true,"Leyendo estado de cuenta...");
+  estadoCuentaText=""; estadoImages=[];
   try {
-    if(file.type==="application/pdf"||file.name.endsWith(".pdf")){
-      // Extraer texto con PDF.js
-      const buf=await file.arrayBuffer();
-      const pdf=await pdfjsLib.getDocument({data:new Uint8Array(buf)}).promise;
-      let text="";
-      for(let p=1;p<=pdf.numPages;p++){
-        const page=await pdf.getPage(p);
-        const content=await page.getTextContent();
-        const rows={};
-        content.items.filter(it=>it.str&&it.str.trim()).forEach(it=>{
-          const y=Math.round(it.transform[5]);
-          if(!rows[y]) rows[y]=[];
-          rows[y].push({x:it.transform[4],str:it.str});
-        });
-        Object.keys(rows).map(Number).sort((a,b)=>b-a).forEach(y=>{
-          text+=rows[y].sort((a,b)=>a.x-b.x).map(r=>r.str).join(" ")+"\n";
-        });
+    for(const file of files){
+      const isImg=file.type.startsWith("image/");
+      const isPdf=file.type==="application/pdf"||file.name.toLowerCase().endsWith(".pdf");
+      if(isImg){
+        // Comprimir la foto y guardarla en base64 para la IA de visión
+        const b64=await compressImage(file,1600,0.8);
+        estadoImages.push(b64);
+      } else if(isPdf){
+        const buf=await file.arrayBuffer();
+        const pdf=await pdfjsLib.getDocument({data:new Uint8Array(buf)}).promise;
+        let text="";
+        for(let p=1;p<=pdf.numPages;p++){
+          const page=await pdf.getPage(p);
+          const content=await page.getTextContent();
+          const rows={};
+          content.items.filter(it=>it.str&&it.str.trim()).forEach(it=>{
+            const y=Math.round(it.transform[5]);
+            if(!rows[y]) rows[y]=[];
+            rows[y].push({x:it.transform[4],str:it.str});
+          });
+          Object.keys(rows).map(Number).sort((a,b)=>b-a).forEach(y=>{
+            text+=rows[y].sort((a,b)=>a.x-b.x).map(r=>r.str).join(" ")+"\n";
+          });
+        }
+        estadoCuentaText+=text+"\n";
+      } else {
+        estadoCuentaText+=await file.text()+"\n";
       }
-      estadoCuentaText=text;
-    } else {
-      // Texto plano o CSV
-      estadoCuentaText=await file.text();
     }
     setLoading(false);
-    $("estadoPreview").textContent=estadoCuentaText.slice(0,500)+"...";
+    const nImg=estadoImages.length, nTxt=estadoCuentaText.trim().length;
+    $("estadoPreview").textContent=
+      (nImg?`📷 ${nImg} imagen${nImg>1?"es":""} lista${nImg>1?"s":""} para analizar\n`:"")+
+      (nTxt?estadoCuentaText.slice(0,400)+"...":(nImg?"":"Sin contenido legible"));
     $("estadoPanel").style.display="block";
-    toast("📄 Estado de cuenta cargado — presiona 'Analizar con IA'");
+    toast((nImg?"📷":"📄")+" Estado de cuenta cargado — presiona 'Analizar con IA'");
   } catch(err) {
     setLoading(false);
     toast("Error leyendo archivo: "+err.message,"error");
   }
 }
 
+// Comprime una imagen a JPEG base64 (sin el prefijo data:)
+function compressImage(file,maxDim,quality){
+  return new Promise((resolve,reject)=>{
+    const img=new Image();
+    img.onload=()=>{
+      let{width:w,height:h}=img;
+      if(w>maxDim||h>maxDim){ const r=Math.min(maxDim/w,maxDim/h); w=Math.round(w*r); h=Math.round(h*r); }
+      const cv=document.createElement("canvas"); cv.width=w; cv.height=h;
+      cv.getContext("2d").drawImage(img,0,0,w,h);
+      resolve(cv.toDataURL("image/jpeg",quality).split(",")[1]);
+    };
+    img.onerror=reject;
+    img.src=URL.createObjectURL(file);
+  });
+}
+
 async function analyzeEstadoCuenta() {
-  if(!estadoCuentaText){ toast("Primero carga tu estado de cuenta","error"); return; }
+  if(!estadoCuentaText.trim() && !estadoImages.length){ toast("Primero carga tu estado de cuenta","error"); return; }
   if(!anthKey()){ toast("Configura la IA: toca tu avatar → 🤖 Configurar IA","error"); return; }
   setLoading(true,"🤖 Analizando con IA...");
   try {
     const name_=currentUser.displayName||currentUser.email.split("@")[0];
-    const prompt=`Eres un asistente financiero personal para Chile. El usuario ${name_} te comparte su estado de cuenta bancario.
+    const hoy=today();
+    const prompt=`Eres un asistente financiero personal para Chile. El usuario ${name_} te comparte su estado de cuenta bancario o de tarjeta de crédito${estadoImages.length?" como imágenes (fotos/capturas)":""}. La fecha de hoy es ${hoy}.
 
-Analiza el texto y:
-1. Extrae TODAS las transacciones (monto, descripción, fecha, tipo: cargo/abono)
+Analiza y:
+1. Extrae TODAS las transacciones (monto en pesos chilenos, descripción, fecha, tipo: cargo/abono)
 2. Clasifica cada una en: ${PRIVATE_CATS.map(c=>c.label).join(", ")}
 3. Calcula el total gastado por categoría
-4. Identifica patrones de gasto preocupantes
-5. Da 3 recomendaciones específicas basadas en los datos
+4. ESTIMA EL PAGO DE TARJETA DE CRÉDITO a fin de mes: identifica el cupo facturado/monto facturado del período, el pago mínimo y el pago total facturado si aparecen. Si es una tarjeta con cuotas, considera solo la cuota del mes. Si no hay un total explícito, suma los cargos del período como estimación y acláralo.
+5. Identifica patrones o cobros preocupantes
+6. Da 3 recomendaciones concretas
 
 Responde SOLO en JSON sin texto extra:
 {
   "transactions": [{"desc":"...","amount":12000,"date":"2026-06-15","cat":"bencina","type":"cargo"}],
   "summary": {"totalGastos":0,"totalAbonos":0,"categorias":{"bencina":0}},
-  "insights": ["Gastas un 40% de tu sueldo en...","..."],
-  "recommendations": ["Reducir...","...","..."],
-  "alertas": ["Cargo no reconocido de $..."]
+  "tarjeta": {"totalFacturado":0,"pagoMinimo":0,"fechaVencimiento":"2026-07-30","estimadoAFinDeMes":0,"esEstimacion":true,"detalle":"Explica brevemente cómo se calculó el estimado"},
+  "insights": ["...","..."],
+  "recommendations": ["...","...","..."],
+  "alertas": ["..."]
 }
+Si algún dato de tarjeta no está disponible, usa 0. ${estadoCuentaText.trim()?"":"Toda la información está en las imágenes adjuntas."}
 
-ESTADO DE CUENTA:
-${estadoCuentaText.slice(0,8000)}`;
+${estadoCuentaText.trim()?"ESTADO DE CUENTA (texto):\n"+estadoCuentaText.slice(0,8000):""}`;
+
+    const content=[{type:"text",text:prompt}];
+    estadoImages.slice(0,5).forEach(b64=>content.push({type:"image",source:{type:"base64",media_type:"image/jpeg",data:b64}}));
 
     const res=await fetch("https://api.anthropic.com/v1/messages",{
       method:"POST",
       headers:{"Content-Type":"application/json","x-api-key":anthKey(),"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
-      body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:3000,messages:[{role:"user",content:prompt}]})
+      body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:3500,messages:[{role:"user",content}]})
     });
-    if(!res.ok) throw new Error("API error "+res.status);
+    if(!res.ok){ const et=await res.text().catch(()=>""); throw new Error("API "+res.status+(res.status===401?" — revisa tu clave de IA":res.status===400&&/image/i.test(et)?" — imagen no válida":"")); }
     const data=await res.json();
-    const raw=(data.content?.[0]?.text||"").replace(/```json|```/g,"").trim();
-    const parsed=JSON.parse(raw);
+    const raw=(data.content||[]).map(b=>b.type==="text"?b.text:"").join("").replace(/```json|```/g,"").trim();
+    const jsonStr=raw.slice(raw.indexOf("{"),raw.lastIndexOf("}")+1);
+    const parsed=JSON.parse(jsonStr);
 
     setLoading(false);
     showEstadoResults(parsed);
@@ -946,8 +986,13 @@ ${estadoCuentaText.slice(0,8000)}`;
         STATE.expenses[uid_].unshift({id:newId,...newExp});
       }
       LS.set("exp_"+(currentUser.displayName||"user"),STATE.expenses[uid_]);
-      renderFinanzas(); renderDashboard();
     }
+    // Guardar estimado de tarjeta para la proyección del mes
+    if(parsed.tarjeta && (parsed.tarjeta.estimadoAFinDeMes||parsed.tarjeta.totalFacturado)){
+      localStorage.setItem("lj6_card_"+currentUser.uid, JSON.stringify({...parsed.tarjeta, ts:Date.now()}));
+    }
+    estadoImages=[]; // liberar memoria
+    renderFinanzas(); renderDashboard();
   } catch(err){
     setLoading(false);
     toast("Error analizando: "+err.message,"error");
@@ -960,7 +1005,19 @@ function showEstadoResults(parsed) {
   const rec=(parsed.recommendations||[]).map(i=>`<div class="rec-row">💡 ${i}</div>`).join("");
   const ale=(parsed.alertas||[]).map(i=>`<div class="alert-row">⚠️ ${i}</div>`).join("");
   const cats=Object.entries(parsed.summary?.categorias||{}).sort((a,b)=>b[1]-a[1]);
+  const tj=parsed.tarjeta||{};
+  const tjEstimado=tj.estimadoAFinDeMes||tj.totalFacturado||0;
+  const tarjetaBlock=tjEstimado?`
+    <div class="results-block card-estimate">
+      <div class="rb-title">💳 Estimado de tarjeta a fin de mes</div>
+      <div class="card-big">${clp(tjEstimado)}${tj.esEstimacion?'<span class="card-est-tag">estimado</span>':''}</div>
+      ${tj.fechaVencimiento?`<div class="rb-row"><span>📅 Vence</span><span>${tj.fechaVencimiento}</span></div>`:""}
+      ${tj.totalFacturado?`<div class="rb-row"><span>Total facturado</span><span class="neg">${clp(tj.totalFacturado)}</span></div>`:""}
+      ${tj.pagoMinimo?`<div class="rb-row"><span>Pago mínimo</span><span>${clp(tj.pagoMinimo)}</span></div>`:""}
+      ${tj.detalle?`<div class="card-detail">ℹ️ ${tj.detalle}</div>`:""}
+    </div>`:"";
   r.innerHTML=`
+    ${tarjetaBlock}
     <div class="results-block">
       <div class="rb-title">📊 Resumen del mes</div>
       <div class="rb-row"><span>Total gastos</span><span class="neg">${clp(parsed.summary?.totalGastos||0)}</span></div>
@@ -1997,6 +2054,10 @@ img{display:block;max-width:100%}
 .proj-bar{height:7px;background:var(--bg3);border-radius:5px;overflow:hidden;margin-bottom:7px}
 .proj-bar-fill{height:100%;border-radius:5px;transition:width .6s ease}
 .proj-note{font-size:11px;color:var(--text2)}
+.card-estimate{border-color:var(--accent)!important;background:linear-gradient(135deg,var(--accentbg),transparent)}
+.card-big{font-size:28px;font-weight:800;font-family:"Fraunces",serif;color:var(--accent);margin:4px 0 10px;display:flex;align-items:baseline;gap:8px}
+.card-est-tag{font-size:10px;font-weight:700;font-family:"Inter",sans-serif;background:var(--yellowbg);color:var(--yellow);border-radius:12px;padding:2px 8px}
+.card-detail{font-size:11px;color:var(--text2);margin-top:8px;padding-top:8px;border-top:1px solid var(--border);line-height:1.4}
 
 /* ── Donut finanzas ── */
 .fin-donut-card{margin:0 18px 14px;background:var(--sur);border:1px solid var(--border);border-radius:var(--r-l);padding:16px 18px;box-shadow:var(--sh)}
@@ -2447,17 +2508,17 @@ img{display:block;max-width:100%}
       <!-- Estado de Cuenta -->
       <div class="estado-section">
         <div class="estado-header">
-          <span style="font-size:13px;font-weight:700">📄 Estado de cuenta bancario</span>
+          <span style="font-size:13px;font-weight:700">💳 Estado de cuenta / Tarjeta<br><span style="font-size:10px;font-weight:600;color:var(--text3)">Sube fotos o PDF — estima tu pago a fin de mes</span></span>
           <div style="display:flex;gap:7px">
             <label class="btn btn-ghost btn-sm" style="cursor:pointer">
-              📁 Cargar <input type="file" accept=".pdf,.csv,.txt,.xls,.xlsx" style="display:none" onchange="loadEstadoCuenta(event)">
+              📁 Archivo/Foto <input type="file" accept=".pdf,.csv,.txt,.xls,.xlsx,image/*" multiple style="display:none" onchange="loadEstadoCuenta(event)">
             </label>
           </div>
         </div>
         <div id="estadoPanel" style="display:none;padding:14px 16px">
           <div style="font-size:11px;font-weight:700;color:var(--text2);margin-bottom:6px">Vista previa:</div>
           <div id="estadoPreview"></div>
-          <button class="btn btn-accent btn-full" onclick="analyzeEstadoCuenta()">🤖 Analizar con IA y clasificar gastos</button>
+          <button class="btn btn-accent btn-full" onclick="analyzeEstadoCuenta()">🤖 Analizar y estimar pago de tarjeta</button>
         </div>
         <div id="estadoResults" style="padding:14px 16px;display:none"></div>
       </div>
