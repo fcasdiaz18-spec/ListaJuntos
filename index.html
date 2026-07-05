@@ -1256,8 +1256,7 @@ function openAddExpense(){
   $("expSheetTitle").textContent="Registrar gasto personal";
   $("expSubmitBtn").textContent="Registrar gasto";
   $("expDesc").value=""; $("expAmount").value=""; $("expDate").value=today();
-  $("expRepeat").value="1"; $("expRepeatWrap").style.display="block";
-  if($("expCustomMonths")){ $("expCustomMonths").value=""; $("expCustomMonths").style.display="none"; }
+  $("expRepeatMonths").value=""; $("expRepeatWrap").style.display="block";
   sheetExpCat=null; renderExpSheetCats();
   openSheet("addExpense");
 }
@@ -1299,9 +1298,8 @@ async function addExpense() {
   }
 
   // Modo creación (con recurrencia opcional)
-  const repSel=$("expRepeat").value;
-  let repeat = repSel==="custom" ? (parseInt($("expCustomMonths").value)||1) : (parseInt(repSel)||1);
-  repeat=Math.max(1,Math.min(600,repeat));
+  const repInput = parseInt($("expRepeatMonths").value) || 1;
+  let repeat = Math.max(1, Math.min(600, repInput));
   if(repeat>1 && !confirm(`¿Crear ${repeat} gastos mensuales de ${clp(amount)} c/u?\nTotal: ${clp(amount*repeat)}`)) return;
   const groupId=repeat>1?uid():null;
   const [by,bm,bd]=date.split("-").map(Number);
@@ -2333,16 +2331,8 @@ function renderDeudas(){
   updateBadges();
 }
 
-function toggleCustomMonths(){
-  const sel=$("dRepeat").value;
-  const inp=$("dCustomMonths");
-  if(inp) inp.style.display = sel==="custom" ? "block" : "none";
-}
-function toggleExpCustomMonths(){
-  const sel=$("expRepeat").value;
-  const inp=$("expCustomMonths");
-  if(inp) inp.style.display = sel==="custom" ? "block" : "none";
-}
+function setDebtMonths(n){ const el=$("dRepeatMonths"); if(el){ el.value = n>1?n:""; } }
+function setExpMonths(n){ const el=$("expRepeatMonths"); if(el){ el.value = n>1?n:""; } }
 
 async function addDebt(){
   const desc=  $("dDesc").value.trim();
@@ -2351,9 +2341,8 @@ async function addDebt(){
   const owed=  $("dOwed").value;
   const cat=   $("dCat").value;
   const baseDate=$("dDate").value||today();
-  const repSel=$("dRepeat").value;
-  let repeat = repSel==="custom" ? (parseInt($("dCustomMonths").value)||1) : (parseInt(repSel)||1);
-  repeat=Math.max(1,Math.min(600,repeat)); // tope de seguridad
+  const repInput = parseInt($("dRepeatMonths").value) || 1;
+  let repeat = Math.max(1, Math.min(600, repInput)); // tope de seguridad
   if(!desc||!amount){ toast("Completa descripción y monto","error"); return; }
   if(repeat>1 && !confirm(`¿Crear ${repeat} cuotas de ${clp(amount)} c/u?\n"${desc}"\nTotal: ${clp(amount*repeat)}`)) return;
   const myName=currentUser.displayName||currentUser.email.split("@")[0];
@@ -2373,8 +2362,7 @@ async function addDebt(){
   LS.set("debts",STATE.debts);
   setLoading(false);
   closeSheet("addDebt");
-  $("dDesc").value=""; $("dAmount").value=""; $("dDate").value=""; $("dRepeat").value="1";
-  if($("dCustomMonths")){ $("dCustomMonths").value=""; $("dCustomMonths").style.display="none"; }
+  $("dDesc").value=""; $("dAmount").value=""; $("dDate").value=""; $("dRepeatMonths").value="";
   renderDeudas(); renderDashboard();
   notifyPartner("deuda", `${shortName(payer)} registró: ${desc} · ${clp(amount)}${repeat>1?` (${repeat} meses)`:""}`);
   toast(repeat>1?`💸 ${repeat} cuotas creadas: ${clp(amount)} c/u`:"💸 Gasto registrado: "+clp(amount));
@@ -2931,6 +2919,9 @@ img{display:block;max-width:100%}
 .stmt-note{font-size:10.5px;color:var(--text3);margin-top:8px;padding-top:8px;border-top:1px solid var(--border);line-height:1.4}
 .sheet-topbar{display:flex;align-items:center;margin-bottom:14px}
 .sheet-close-row{display:flex;justify-content:flex-end;margin-bottom:6px}
+.quick-months{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.qm-chip{font-size:12px;font-weight:700;background:var(--accentbg);color:var(--accent2);border:1px solid var(--privbr);border-radius:14px;padding:5px 13px;cursor:pointer;-webkit-tap-highlight-color:transparent;user-select:none}
+.qm-chip:active{background:var(--accent);color:#fff}
 .sheet-close-btn{background:var(--bg2);border:1px solid var(--border2);border-radius:20px;padding:7px 15px;font-size:13px;font-weight:700;color:var(--text2);cursor:pointer;-webkit-tap-highlight-color:transparent;font-family:"Inter",sans-serif}
 .sheet-close-btn:active{background:var(--redbg);color:var(--red)}
 .sheet-back-btn{background:var(--bg2);border:1px solid var(--border2);border-radius:20px;padding:8px 16px;font-size:13px;font-weight:700;color:var(--accent);cursor:pointer;-webkit-tap-highlight-color:transparent;font-family:"Inter",sans-serif}
@@ -3561,7 +3552,7 @@ img{display:block;max-width:100%}
         </div>
 
         <button class="btn btn-red btn-full" style="margin-top:16px" onclick="doLogout()">↩️ Cerrar sesión</button>
-        <div style="text-align:center;font-size:10px;color:var(--text3);margin-top:14px">ListaJuntos v9</div>
+        <div style="text-align:center;font-size:10px;color:var(--text3);margin-top:14px">ListaJuntos v10</div>
       </div>
     </div>
 
@@ -3620,17 +3611,16 @@ img{display:block;max-width:100%}
       </div>
       <div class="field-group" id="expRepeatWrap">
         <label>🔁 Repetir a futuro (opcional)</label>
-        <select class="field-input" id="expRepeat" onchange="toggleExpCustomMonths()">
-          <option value="1">Solo esta vez</option>
-          <option value="3">Próximos 3 meses</option>
-          <option value="6">Próximos 6 meses</option>
-          <option value="12">Próximos 12 meses</option>
-          <option value="24">Próximos 24 meses (2 años)</option>
-          <option value="36">Próximos 36 meses (3 años)</option>
-          <option value="custom">✏️ Cantidad exacta de meses...</option>
-        </select>
-        <input class="field-input" id="expCustomMonths" type="number" min="1" max="600" placeholder="Ej: 48 meses (4 años)" style="display:none;margin-top:8px">
-        <div style="font-size:10.5px;color:var(--text3);margin-top:4px">Para suscripciones, gym, arriendo y gastos fijos mensuales</div>
+        <input class="field-input" id="expRepeatMonths" type="number" inputmode="numeric" min="1" max="600" placeholder="Escribe cuántos meses (ej: 12, 48...)" value="">
+        <div class="quick-months">
+          <span class="qm-chip" onclick="setExpMonths(1)">1 vez</span>
+          <span class="qm-chip" onclick="setExpMonths(3)">3m</span>
+          <span class="qm-chip" onclick="setExpMonths(6)">6m</span>
+          <span class="qm-chip" onclick="setExpMonths(12)">1 año</span>
+          <span class="qm-chip" onclick="setExpMonths(24)">2 años</span>
+          <span class="qm-chip" onclick="setExpMonths(36)">3 años</span>
+        </div>
+        <div style="font-size:10.5px;color:var(--text3);margin-top:6px">Déjalo vacío o en 1 para un gasto único. Escribe el número de meses para suscripciones, gym, arriendo, créditos, etc.</div>
       </div>
       <div class="field-group">
         <label>Categoría</label>
@@ -3730,17 +3720,16 @@ img{display:block;max-width:100%}
       </div>
       <div class="field-group">
         <label>🔁 Repetir a futuro (opcional)</label>
-        <select class="field-input" id="dRepeat" onchange="toggleCustomMonths()">
-          <option value="1">Solo este mes</option>
-          <option value="3">Próximos 3 meses</option>
-          <option value="6">Próximos 6 meses</option>
-          <option value="12">Próximos 12 meses</option>
-          <option value="24">Próximos 24 meses</option>
-          <option value="36">Próximos 36 meses (3 años)</option>
-          <option value="custom">✏️ Cantidad exacta de cuotas...</option>
-        </select>
-        <input class="field-input" id="dCustomMonths" type="number" min="1" max="600" placeholder="Ej: 240 (hipotecario a 20 años)" style="display:none;margin-top:8px">
-        <div style="font-size:10.5px;color:var(--text3);margin-top:4px">Ideal para dividendos, créditos y cuotas fijas — se crea una deuda por cada mes</div>
+        <input class="field-input" id="dRepeatMonths" type="number" inputmode="numeric" min="1" max="600" placeholder="Escribe cuántas cuotas (ej: 12, 240...)" value="">
+        <div class="quick-months">
+          <span class="qm-chip" onclick="setDebtMonths(1)">1 vez</span>
+          <span class="qm-chip" onclick="setDebtMonths(3)">3m</span>
+          <span class="qm-chip" onclick="setDebtMonths(6)">6m</span>
+          <span class="qm-chip" onclick="setDebtMonths(12)">1 año</span>
+          <span class="qm-chip" onclick="setDebtMonths(24)">2 años</span>
+          <span class="qm-chip" onclick="setDebtMonths(240)">20 años</span>
+        </div>
+        <div style="font-size:10.5px;color:var(--text3);margin-top:6px">Déjalo vacío o en 1 para una deuda única. Escribe el número de cuotas para dividendos, créditos e hipotecarios (ej: 240 = 20 años).</div>
       </div>
       <div id="debtPreview" style="background:var(--bg2);border-radius:var(--r-s);padding:10px;font-size:12px;color:var(--text2);display:none"></div>
       <button class="btn btn-accent btn-full" onclick="addDebt()">Registrar gasto</button>
