@@ -142,6 +142,26 @@ const LS = {
 const $ = id => document.getElementById(id);
 const clp = n => "$"+(Math.round(n)||0).toLocaleString("es-CL");
 
+// Traduce errores de IA a mensajes claros
+function aiErrMsg(e){
+  const m=e?.message||String(e);
+  if(e?.name==="AbortError"||/abort/i.test(m)) return "La búsqueda tardó demasiado (60s). Reintenta — a veces el servidor está ocupado.";
+  if(/Failed to fetch|NetworkError|network/i.test(m)) return "Sin conexión o CORS bloqueado. Revisa tu internet.";
+  if(/401/.test(m)) return "Clave de IA inválida. Reconfigúrala en tu avatar → 🤖 Configurar IA.";
+  if(/429/.test(m)) return "Demasiadas solicitudes o saldo agotado. Revisa tu crédito en Anthropic.";
+  if(/400/.test(m)) return "La solicitud falló. Si subiste imágenes, prueba con menos o más nítidas.";
+  return m;
+}
+
+// Fetch con timeout (para llamadas de IA que pueden colgarse)
+async function fetchWithTimeout(url, opts, ms=60000){
+  const ctrl=new AbortController();
+  const t=setTimeout(()=>ctrl.abort(), ms);
+  try{
+    return await fetch(url, {...opts, signal:ctrl.signal});
+  } finally { clearTimeout(t); }
+}
+
 // Extrae JSON de la respuesta de la IA, reparándolo si vino cortado por longitud
 function parseAIJson(text){
   let t=String(text||"").replace(/```json|```/g,"").trim();
@@ -196,9 +216,25 @@ function toast(msg, type="ok") {
   t._t = setTimeout(() => t.classList.remove("show"), 3200);
 }
 
+let loadingTimer=null;
 function setLoading(show, msg="Cargando...") {
   const el = $("loadingOverlay");
-  if(el) { el.style.display = show ? "flex" : "none"; if(msg) el.querySelector(".loading-msg").textContent = msg; }
+  if(!el) return;
+  if(loadingTimer){ clearInterval(loadingTimer); loadingTimer=null; }
+  el.style.display = show ? "flex" : "none";
+  if(show && msg){
+    const m=el.querySelector(".loading-msg"); if(m) m.textContent=msg;
+    const sub=el.querySelector(".loading-sub");
+    if(sub){
+      const t0=Date.now();
+      sub.textContent="";
+      // Mostrar segundos transcurridos en operaciones largas (IA)
+      loadingTimer=setInterval(()=>{
+        const s=Math.floor((Date.now()-t0)/1000);
+        sub.textContent = s<3?"" : s<25?`${s}s · procesando...` : `${s}s · las búsquedas con IA pueden tardar hasta 40s`;
+      },1000);
+    }
+  }
 }
 
 // ══════════════════════════════════════════════════
@@ -509,14 +545,15 @@ function adminClearExpenses(uid_) {
 //  PERFIL (sheet con info de usuario + admin)
 // ══════════════════════════════════════════════════
 function openProfile() {
-  if (!currentUser) return;
-  $("profAvatar").textContent = currentUser.avatar;
-  $("profAvatar").style.background = currentUser.color;
-  $("profName").textContent = currentUser.displayName;
-  $("profRole").innerHTML = isAdmin()
+  if (!currentUser) { showAuth(); return; }
+  const av=$("profAvatar"), nm=$("profName"), rl=$("profRole"), ap=$("adminPanel");
+  if(av){ av.textContent = currentUser.avatar || (currentUser.displayName||"?")[0]; av.style.background = currentUser.color || "linear-gradient(135deg,#6B4EFF,#4E9FFF)"; }
+  if(nm) nm.textContent = currentUser.displayName || "Usuario";
+  if(rl) rl.innerHTML = isAdmin()
     ? '<span class="role-badge admin">👑 Administrador</span>'
     : '<span class="role-badge">Usuario</span>';
-  $("adminPanel").style.display = isAdmin() ? "block" : "none";
+  // El panel de administración SOLO se muestra al admin (Felipe)
+  if(ap) ap.style.display = isAdmin() ? "block" : "none";
   openSheet("perfil");
 }
 
@@ -604,6 +641,8 @@ let darkMode = LS.get("darkMode") === true; // claro por defecto
 function applyTheme() {
   document.documentElement.setAttribute("data-theme", darkMode?"dark":"light");
   $("themeIcon").textContent = darkMode?"☀️":"🌙";
+  const tc=document.querySelector('meta[name="theme-color"]');
+  if(tc) tc.setAttribute("content", darkMode?"#080B14":"#F6F7FB");
 }
 function toggleTheme() { darkMode=!darkMode; LS.set("darkMode",darkMode); applyTheme(); }
 
@@ -690,37 +729,37 @@ function renderDashboard() {
     const d=daysLeft(i); return i.qty===0||(d!==null&&d<=2);
   });
 
-  // Context ticker
+  // Context ticker (chips clickeables → abren su sección)
   $("contextTicker").innerHTML = [
-    {cls:personalTotal>0?"warn":"ok",icon:"💳",text:"Personal",val:clp(personalTotal)},
-    {cls:sharedTotal>0?"warn":"ok",icon:"🏠",text:"Hogar",val:clp(sharedTotal)},
-    {cls:lowInv.length>0?"urgent":"ok",icon:"📦",text:"Stock bajo",val:lowInv.length+" items"},
-    {cls:STATE.debts.filter(d=>!d.paid).length>0?"urgent":"ok",icon:"💸",text:"Deudas",val:STATE.debts.filter(d=>!d.paid).length+" pend."},
-    {cls:bal.owed<500?"ok":"warn",icon:"⚖️",text:"Balance",val:bal.owed<500?"OK":clp(bal.owed)},
-  ].map(t=>`<div class="ticker-chip ${t.cls}">
+    {cls:personalTotal>0?"warn":"ok",icon:"💳",text:"Personal",val:clp(personalTotal),go:"finanzas"},
+    {cls:sharedTotal>0?"warn":"ok",icon:"🏠",text:"Hogar",val:clp(sharedTotal),go:"deudas"},
+    {cls:lowInv.length>0?"urgent":"ok",icon:"📦",text:"Stock bajo",val:lowInv.length+" items",go:"inventario"},
+    {cls:STATE.debts.filter(d=>!d.paid).length>0?"urgent":"ok",icon:"💸",text:"Deudas",val:STATE.debts.filter(d=>!d.paid).length+" pend.",go:"deudas"},
+    {cls:bal.owed<500?"ok":"warn",icon:"⚖️",text:"Balance",val:bal.owed<500?"OK":clp(bal.owed),go:"deudas"},
+  ].map(t=>`<div class="ticker-chip ${t.cls}" onclick="navTo('${t.go}')" style="cursor:pointer">
     <span class="tc-icon">${t.icon}</span>
     <span class="tc-text">${t.text}</span>
     <span class="tc-val">${t.val}</span>
   </div>`).join("");
 
-  // Stats
+  // Stats (clickeables)
   $("statsGrid").innerHTML = `
-    <div class="stat-card income">
+    <div class="stat-card income" onclick="navTo('deudas')" style="cursor:pointer">
       <div class="stat-label">Hogar este mes</div>
       <div class="stat-value">${clp(sharedTotal)}</div>
       <div class="stat-delta" style="color:var(--text2)">${sharedDebts.length} transacciones</div>
     </div>
-    <div class="stat-card expenses">
+    <div class="stat-card expenses" onclick="navTo('finanzas')" style="cursor:pointer">
       <div class="stat-label">Personal (${name_})</div>
       <div class="stat-value neg">${clp(personalTotal)}</div>
       <div class="stat-delta" style="color:var(--text2)">${myExp.length} gastos</div>
     </div>
-    <div class="stat-card savings">
+    <div class="stat-card savings" onclick="navTo('inventario')" style="cursor:pointer">
       <div class="stat-label">Inventario</div>
       <div class="stat-value">${STATE.inventario.length}</div>
       <div class="stat-delta" style="color:var(--yellow)">${lowInv.length} bajo stock</div>
     </div>
-    <div class="stat-card balance">
+    <div class="stat-card balance" onclick="navTo('deudas')" style="cursor:pointer">
       <div class="stat-label">Balance hogar</div>
       <div class="stat-value ${bal.owed<500?"pos":"neg"}">${bal.owed<500?"OK":clp(bal.owed)}</div>
       <div class="stat-delta" style="color:var(--text2)">${bal.owed<500?"Equilibrado":bal.felipeNet<0?name_+" debe":"Otro debe"}</div>
@@ -1015,7 +1054,7 @@ Categorías: ${PRIVATE_CATS.map(c=>c.id+":"+c.label).join(", ")}
 
 Responde SOLO JSON compacto:
 {"titular":"frase resumen del mes","totalGastado":0,"categoriaTop":"label","insights":["obs 1","obs 2","obs 3"],"consejo":"un consejo accionable para el próximo mes"}`;
-    const res=await fetch("https://api.anthropic.com/v1/messages",{
+    const res=await fetchWithTimeout("https://api.anthropic.com/v1/messages",{
       method:"POST",
       headers:{"Content-Type":"application/json","x-api-key":anthKey(),"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
       body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:1200,messages:[{role:"user",content:prompt}]})
@@ -1036,7 +1075,7 @@ Responde SOLO JSON compacto:
     toast("📅 Resumen del mes listo");
   }catch(e){
     setLoading(false);
-    toast("No se pudo generar: "+e.message,"error");
+    toast("No se pudo generar: "+aiErrMsg(e),"error");
   }
 }
 
@@ -1322,7 +1361,7 @@ ${estadoCuentaText.trim()?"ESTADO DE CUENTA (texto):\n"+estadoCuentaText.slice(0
     const content=[{type:"text",text:prompt}];
     estadoImages.slice(0,5).forEach(b64=>content.push({type:"image",source:{type:"base64",media_type:"image/jpeg",data:b64}}));
 
-    const res=await fetch("https://api.anthropic.com/v1/messages",{
+    const res=await fetchWithTimeout("https://api.anthropic.com/v1/messages",{
       method:"POST",
       headers:{"Content-Type":"application/json","x-api-key":anthKey(),"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
       body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:6000,messages:[{role:"user",content}]})
@@ -1354,7 +1393,7 @@ ${estadoCuentaText.trim()?"ESTADO DE CUENTA (texto):\n"+estadoCuentaText.slice(0
     renderFinanzas(); renderDashboard();
   } catch(err){
     setLoading(false);
-    toast("Error analizando: "+err.message,"error");
+    toast("Error analizando: "+aiErrMsg(err),"error");
   }
 }
 
@@ -1415,7 +1454,7 @@ Responde SOLO en JSON:
   "ahorroPotencial": 0,
   "consejos": ["consejo 1","consejo 2","consejo 3"]
 }`;
-    const res=await fetch("https://api.anthropic.com/v1/messages",{
+    const res=await fetchWithTimeout("https://api.anthropic.com/v1/messages",{
       method:"POST",
       headers:{"Content-Type":"application/json","x-api-key":anthKey(),"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
       body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:1500,messages:[{role:"user",content:prompt}]})
@@ -1614,6 +1653,13 @@ function renderInventario(){
   const catOrder=Object.keys(CAT_EMOJI);
   const groups={};
   list.forEach(i=>{ const c=CAT_EMOJI[i.cat]?i.cat:"Otros"; (groups[c]=groups[c]||[]).push(i); });
+  // Ordenar cada grupo: los más próximos a quiebre (menos días) primero
+  const sortByStock=(a,b)=>{
+    const da=daysLeft(a), db=daysLeft(b);
+    const va=da===null?9999:da, vb=db===null?9999:db;
+    return va-vb;
+  };
+  Object.values(groups).forEach(g=>g.sort(sortByStock));
   grid.innerHTML=catOrder.filter(c=>groups[c]).map(c=>`
     <div class="inv-cat-header" style="grid-column:1/-1">${CAT_EMOJI[c]} ${c} <span class="inv-cat-count">${groups[c].length}</span></div>
     ${groups[c].map(item=>renderInvCard(item)).join("")}`).join("");
@@ -1796,7 +1842,7 @@ async function analyzeImage(b64data,mime){
   const b64=b64data.replace(/^data:[^;]+;base64,/,"");
   const apiMime=["image/jpeg","image/png","image/gif","image/webp"].includes(mime)?mime:"image/jpeg";
   try{
-    const res=await fetch("https://api.anthropic.com/v1/messages",{
+    const res=await fetchWithTimeout("https://api.anthropic.com/v1/messages",{
       method:"POST",
       headers:{"Content-Type":"application/json","x-api-key":anthKey(),"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
       body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:2000,messages:[{role:"user",content:[
@@ -1808,7 +1854,7 @@ async function analyzeImage(b64data,mime){
     const data=await res.json();
     const raw=(data.content?.[0]?.text||"");
     showBoletaResult(parseAIJson(raw));
-  }catch(err){ showBoletaError("No se pudo analizar: "+err.message); }
+  }catch(err){ showBoletaError("No se pudo analizar: "+aiErrMsg(err)); }
 }
 
 function parseBoleta(text){
@@ -1953,26 +1999,39 @@ function getDebtPeriodList(){
 }
 
 // ── Gráfico de proyección de deudas hacia adelante ──
+let debtExcludeHip=false;
+function toggleExcludeHip(){ debtExcludeHip=!debtExcludeHip; renderDeudas(); }
+
+// Categorías consideradas "hipotecario" para el filtro de exclusión
+function isHipotecario(d){
+  return d.cat==="credito_hip" || /hipotec|dividendo/i.test(d.desc||"");
+}
+
 function renderDebtProjection(){
   const box=$("debtProjection"); if(!box) return;
-  // Solo mostrar el gráfico en vistas "año" y "futuro"
-  if(debtPeriod!=="year" && debtPeriod!=="future"){ box.innerHTML=""; return; }
+  // Mostrar el gráfico en vistas "año", "futuro" y "mes" (6 meses hacia adelante)
+  if(debtPeriod==="all"){ box.innerHTML=""; return; }
 
   const now=new Date(); const curKey=now.getFullYear()*12+now.getMonth();
-  // Construir totales pendientes por mes
-  const monthly={}; // key "YYYY-MM" → monto pendiente
-  STATE.debts.filter(d=>!d.paid).forEach(d=>{
+  const monthly={};
+  STATE.debts.filter(d=>!d.paid).filter(d=>!(debtExcludeHip&&isHipotecario(d))).forEach(d=>{
     const dt=debtDateOf(d);
     const k=dt.getFullYear()+"-"+String(dt.getMonth()+1).padStart(2,"0");
     monthly[k]=(monthly[k]||0)+d.amount;
   });
 
-  // Rango de meses a mostrar
-  let months=[];
+  // Rango de meses según la vista
+  let months=[], rangeLabel="";
   if(debtPeriod==="year"){
     for(let m=0;m<12;m++) months.push({y:debtYear,m});
-  } else { // future: desde este mes, 12 hacia adelante
+    rangeLabel=`📊 Deudas ${debtYear} por mes`;
+  } else if(debtPeriod==="future"){
     for(let i=0;i<12;i++){ const idx=curKey+i; months.push({y:Math.floor(idx/12),m:idx%12}); }
+    rangeLabel="📈 Proyección próximos 12 meses";
+  } else { // month → próximos 6 meses desde el mes visible
+    const baseKey=debtYear*12+debtMonth;
+    for(let i=0;i<6;i++){ const idx=baseKey+i; months.push({y:Math.floor(idx/12),m:idx%12}); }
+    rangeLabel="📊 Próximos 6 meses";
   }
 
   const data=months.map(({y,m})=>{
@@ -1982,11 +2041,7 @@ function renderDebtProjection(){
   const maxV=Math.max(...data.map(d=>d.total),1);
   const totalPeriodo=data.reduce((a,d)=>a+d.total,0);
 
-  // Deuda acumulada restante (cómo baja de aquí en adelante)
-  let acumFuturo=0;
-  if(debtPeriod==="future"){ acumFuturo=totalPeriodo; }
-
-  const bars=data.map((d,i)=>{
+  const bars=data.map((d)=>{
     const h=Math.round(d.total/maxV*100);
     const isPast=(d.y*12+d.m)<curKey;
     const isCurrent=(d.y*12+d.m)===curKey;
@@ -1994,18 +2049,24 @@ function renderDebtProjection(){
     return `<div class="dbar-col" onclick="jumpToMonth(${d.y},${d.m})">
       <div class="dbar-val">${d.total?clp(d.total).replace("$",""):""}</div>
       <div class="dbar-track"><div class="dbar-fill" style="height:${d.total?Math.max(h,3):0}%;background:${col}"></div></div>
-      <div class="dbar-lbl ${isCurrent?"cur":""}">${MESES[d.m].slice(0,3)}${debtPeriod==="future"&&d.m===0?"'"+String(d.y).slice(2):""}</div>
+      <div class="dbar-lbl ${isCurrent?"cur":""}">${MESES[d.m].slice(0,3)}${(d.m===0)?"'"+String(d.y).slice(2):""}</div>
     </div>`;
   }).join("");
 
   box.innerHTML=`
     <div class="debt-proj-card">
       <div class="dproj-head">
-        <div class="dproj-title">${debtPeriod==="future"?"📈 Proyección próximos 12 meses":`📊 Deudas ${debtYear} por mes`}</div>
-        <div class="dproj-total">${clp(totalPeriodo)}<span> total pendiente</span></div>
+        <div class="dproj-title">${rangeLabel}</div>
+        <div class="dproj-total">${clp(totalPeriodo)}<span> pendiente</span></div>
       </div>
       <div class="dbar-chart">${bars}</div>
-      ${debtPeriod==="future"&&totalPeriodo>0?`<div class="dproj-note">Si pagas todo lo agendado, en 12 meses habrás liquidado <strong>${clp(acumFuturo)}</strong>. Toca un mes para ver el detalle.</div>`:`<div class="dproj-note">Toca cualquier barra para ver el detalle de ese mes.</div>`}
+      <div class="dproj-filters">
+        <label class="dproj-toggle" onclick="toggleExcludeHip()">
+          <span class="dproj-check ${debtExcludeHip?"on":""}">${debtExcludeHip?"✓":""}</span>
+          Excluir hipotecario / dividendo del total
+        </label>
+      </div>
+      <div class="dproj-note">Toca cualquier barra para ver el detalle de ese mes.${debtExcludeHip?" <strong>Hipotecario excluido.</strong>":""}</div>
     </div>`;
 }
 
@@ -2051,6 +2112,25 @@ function renderDeudas(){
 
   const CAT_EM={"Supermercado":"🛒","Servicios":"💡","Arriendo":"🏠","Salidas":"🍽️","Salud":"🏥","Transporte":"🚗","Otro":"📦"};
   const dEl=$("debtList");
+  // Estado de cuenta mensual estilo banco (solo en vista de mes)
+  const stmt=$("debtStatement");
+  if(stmt){
+    if(debtPeriod==="month"){
+      const totalMes=pList.reduce((a,d)=>a+d.amount,0);
+      const pendMes=pList.filter(d=>!d.paid).reduce((a,d)=>a+d.amount,0);
+      const pagadoMes=totalMes-pendMes;
+      const cuotasMes=pList.filter(d=>d.groupId).length;
+      stmt.innerHTML=`
+        <div class="stmt-card">
+          <div class="stmt-head">🏦 Estado de cuenta · ${MESES[debtMonth]} ${debtYear}</div>
+          <div class="stmt-row"><span>Total del mes</span><span class="stmt-big">${clp(totalMes)}</span></div>
+          <div class="stmt-line"><span>✅ Pagado</span><span style="color:var(--green)">${clp(pagadoMes)}</span></div>
+          <div class="stmt-line"><span>⏳ Por pagar</span><span style="color:var(--red);font-weight:800">${clp(pendMes)}</span></div>
+          ${cuotasMes?`<div class="stmt-note">📋 ${cuotasMes} cuota${cuotasMes>1?"s":""} de crédito${cuotasMes>1?"s":""} este mes · solo se muestran las del mes en curso</div>`:""}
+        </div>`;
+      stmt.style.display="block";
+    } else { stmt.innerHTML=""; stmt.style.display="none"; }
+  }
   if(!pList.length){
     dEl.innerHTML=`<div class="empty-state"><div class="es-icon">💸</div><div class="es-title">Sin gastos en este período</div><div class="es-sub">Toca "+ Registrar" para agregar un gasto compartido</div></div>`;
     updateBadges(); return;
@@ -2058,6 +2138,7 @@ function renderDeudas(){
   dEl.innerHTML=pList.map(d=>{
     const payerS=shortName(d.payer), otherS=isFel(d.payer)?"Meli":"Felipe";
     const rawDate=d.date||(d.createdAt?.seconds?new Date(d.createdAt.seconds*1000).toISOString().slice(0,10):today());
+    const cuotaTxt=d.cuota&&d.cuotasTotal?` · cuota ${d.cuota}/${d.cuotasTotal}`:"";
     const owedStr=d.owed==="Mitad"
       ?`${otherS} debe ${clp(Math.round(d.amount/2))}`
       :d.owed===d.payer?`Sin deuda para ${otherS}`
@@ -2066,7 +2147,7 @@ function renderDeudas(){
     return `<div class="debt-item${d.paid?" paid":""}">
       <div class="di-avatar" style="background:${isFel(d.payer)?"linear-gradient(135deg,#6B4EFF,#4E9FFF)":"linear-gradient(135deg,#FF6B9A,#FF6B6B)"}">${payerS[0]}</div>
       <div class="di-info">
-        <div class="di-name">${d.desc}</div>
+        <div class="di-name">${d.desc}${cuotaTxt}</div>
         <div class="di-breakdown">Pagó ${payerS} ${clp(d.amount)} → <strong>${owedStr}</strong></div>
         <div class="di-meta">${rawDate} · ${d.addedByName||d.addedBy||"—"}</div>
         <div class="di-tags">
@@ -2089,6 +2170,12 @@ function renderDeudas(){
   updateBadges();
 }
 
+function toggleCustomMonths(){
+  const sel=$("dRepeat").value;
+  const inp=$("dCustomMonths");
+  if(inp) inp.style.display = sel==="custom" ? "block" : "none";
+}
+
 async function addDebt(){
   const desc=  $("dDesc").value.trim();
   const amount=parseCLP($("dAmount").value);
@@ -2096,8 +2183,11 @@ async function addDebt(){
   const owed=  $("dOwed").value;
   const cat=   $("dCat").value;
   const baseDate=$("dDate").value||today();
-  const repeat=parseInt($("dRepeat").value)||1;
+  const repSel=$("dRepeat").value;
+  let repeat = repSel==="custom" ? (parseInt($("dCustomMonths").value)||1) : (parseInt(repSel)||1);
+  repeat=Math.max(1,Math.min(600,repeat)); // tope de seguridad
   if(!desc||!amount){ toast("Completa descripción y monto","error"); return; }
+  if(repeat>1 && !confirm(`¿Crear ${repeat} cuotas de ${clp(amount)} c/u?\n"${desc}"\nTotal: ${clp(amount*repeat)}`)) return;
   const myName=currentUser.displayName||currentUser.email.split("@")[0];
   setLoading(true, repeat>1?`Creando ${repeat} cuotas...`:"Registrando...");
   const groupId=repeat>1?uid():null;
@@ -2108,7 +2198,7 @@ async function addDebt(){
     const dateStr=`${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,"0")}-${String(dt.getDate()).padStart(2,"0")}`;
     const label=repeat>1?`${desc} (${i+1}/${repeat})`:desc;
     const newDebt={desc:label,amount,payer,owed,cat,date:dateStr,paid:false,addedBy:currentUser.uid,addedByName:myName};
-    if(groupId) newDebt.groupId=groupId;
+    if(groupId){ newDebt.groupId=groupId; newDebt.cuota=i+1; newDebt.cuotasTotal=repeat; }
     const newId=await fsAdd(`households/${HOUSEHOLD_ID}/debts`,newDebt);
     STATE.debts.unshift({id:newId,...newDebt});
   }
@@ -2116,6 +2206,7 @@ async function addDebt(){
   setLoading(false);
   closeSheet("addDebt");
   $("dDesc").value=""; $("dAmount").value=""; $("dDate").value=""; $("dRepeat").value="1";
+  if($("dCustomMonths")){ $("dCustomMonths").value=""; $("dCustomMonths").style.display="none"; }
   renderDeudas(); renderDashboard();
   notifyPartner("deuda", `${shortName(payer)} registró: ${desc} · ${clp(amount)}${repeat>1?` (${repeat} meses)`:""}`);
   toast(repeat>1?`💸 ${repeat} cuotas creadas: ${clp(amount)} c/u`:"💸 Gasto registrado: "+clp(amount));
@@ -2252,7 +2343,7 @@ Responde SOLO con JSON válido, sin texto adicional ni markdown:
 {"ofertas":[{"super":"Líder","producto":"Posta rosada al vacío kg","precio":8990,"precioNormal":11990,"descuento":"25%","categoria":"Carnes","detalle":"válido hasta domingo"}]}
 
 Usa exactamente estos nombres de supermercado: Líder, Jumbo, Santa Isabel, Unimarc, Tottus. Entre 10 y 25 ofertas en total. Si de algún supermercado no encuentras nada confiable, omítelo.`;
-    const res=await fetch("https://api.anthropic.com/v1/messages",{
+    const res=await fetchWithTimeout("https://api.anthropic.com/v1/messages",{
       method:"POST",
       headers:{"Content-Type":"application/json","x-api-key":anthKey(),"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
       body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:5000,
@@ -2270,7 +2361,7 @@ Usa exactamente estos nombres de supermercado: Líder, Jumbo, Santa Isabel, Unim
     renderOfertas();
     toast(`🏷️ ${ofertas.length} ofertas encontradas`);
   }catch(e){
-    toast("No se pudieron cargar ofertas: "+e.message,"error");
+    toast("No se pudieron cargar ofertas: "+aiErrMsg(e),"error");
     renderOfertas();
   }
   setLoading(false);
@@ -2510,6 +2601,7 @@ window.addEventListener("DOMContentLoaded",()=>{
   --r:16px; --r-s:10px; --r-l:22px; --r-xl:28px;
   --sh:0 2px 20px rgba(0,0,0,.4); --sh-l:0 8px 40px rgba(0,0,0,.6);
   --safe-b:env(safe-area-inset-bottom,0px); --safe-t:env(safe-area-inset-top,0px);
+  --nav-bg:rgba(8,11,20,.9); --statusbar:#080B14;
 }
 [data-theme="light"] {
   --bg0:#F6F7FB; --bg1:#FFFFFF; --bg2:#F1F3F9; --bg3:#E9ECF5;
@@ -2524,6 +2616,7 @@ window.addEventListener("DOMContentLoaded",()=>{
   --priv:#F1EEFB; --privbr:rgba(91,84,240,.22);
   --shared:#EAF8F2; --sharedbr:rgba(10,185,127,.3);
   --sh:0 2px 14px rgba(30,36,70,.07); --sh-l:0 10px 34px rgba(30,36,70,.12);
+  --nav-bg:rgba(255,255,255,.9); --statusbar:#F6F7FB;
 }
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 html{height:-webkit-fill-available}
@@ -2544,7 +2637,7 @@ img{display:block;max-width:100%}
 .auth-tab{flex:1;padding:8px;border-radius:7px;font-size:13px;font-weight:600;cursor:pointer;text-align:center;color:var(--text2);transition:all .15s;border:none;background:none;font-family:"Inter",sans-serif}
 .auth-tab.on{background:var(--sur2);color:var(--text);box-shadow:var(--sh)}
 .auth-form{width:100%;max-width:360px;display:flex;flex-direction:column;gap:12px}
-.auth-input{background:var(--sur);border:1.5px solid var(--border2);border-radius:var(--r-s);padding:13px 16px;font-size:14px;font-weight:500;color:var(--text);width:100%;transition:border-color .15s}
+.auth-input{background:var(--sur);border:1.5px solid var(--border2);border-radius:var(--r-s);padding:13px 16px;font-size:16px;font-weight:500;color:var(--text);width:100%;transition:border-color .15s}
 .auth-input:focus{border-color:var(--accent)}
 .auth-input::placeholder{color:var(--text3)}
 .auth-btn{background:var(--accent);color:#fff;border:none;border-radius:var(--r-s);padding:14px;font-size:15px;font-weight:700;cursor:pointer;transition:all .15s;width:100%;font-family:"Inter",sans-serif}
@@ -2642,8 +2735,20 @@ img{display:block;max-width:100%}
 .budget-add-chip:active{background:var(--accentbg)}
 /* Herramientas de gastos */
 .exp-tools{display:flex;gap:8px;margin-bottom:10px}
-.exp-search{flex:1;background:var(--sur);border:1px solid var(--border2);border-radius:var(--r-s);padding:9px 13px;font-size:13px;color:var(--text);font-family:"Inter",sans-serif}
+.exp-search{flex:1;background:var(--sur);border:1px solid var(--border2);border-radius:var(--r-s);padding:9px 13px;font-size:16px;color:var(--text);font-family:"Inter",sans-serif}
 .exp-search:focus{outline:none;border-color:var(--accent)}
+/* Filtro excluir hipotecario */
+.dproj-filters{margin-top:10px;padding-top:9px;border-top:1px solid var(--border)}
+.dproj-toggle{display:flex;align-items:center;gap:8px;font-size:12px;font-weight:600;color:var(--text2);cursor:pointer;-webkit-tap-highlight-color:transparent}
+.dproj-check{width:20px;height:20px;border-radius:6px;border:1.5px solid var(--border2);display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:800;color:#fff;flex-shrink:0}
+.dproj-check.on{background:var(--accent);border-color:var(--accent)}
+/* Estado de cuenta estilo banco */
+.stmt-card{background:var(--sur);border:1px solid var(--border);border-radius:var(--r-l);padding:15px 16px;box-shadow:var(--sh)}
+.stmt-head{font-size:12px;font-weight:800;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+.stmt-row{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
+.stmt-big{font-size:22px;font-weight:800;font-family:"Fraunces",serif}
+.stmt-line{display:flex;justify-content:space-between;font-size:13px;font-weight:600;margin-bottom:6px}
+.stmt-note{font-size:10.5px;color:var(--text3);margin-top:8px;padding-top:8px;border-top:1px solid var(--border);line-height:1.4}
 .sheet-topbar{display:flex;align-items:center;margin-bottom:14px}
 .sheet-back-btn{background:var(--bg2);border:1px solid var(--border2);border-radius:20px;padding:8px 16px;font-size:13px;font-weight:700;color:var(--accent);cursor:pointer;-webkit-tap-highlight-color:transparent;font-family:"Inter",sans-serif}
 .sheet-back-btn:active{background:var(--accentbg)}
@@ -2697,12 +2802,13 @@ img{display:block;max-width:100%}
 #loadingOverlay{position:fixed;inset:0;z-index:900;background:rgba(8,11,20,.8);backdrop-filter:blur(8px);display:none;flex-direction:column;align-items:center;justify-content:center;gap:12px}
 .loading-spinner{width:36px;height:36px;border:3px solid var(--border2);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite}
 .loading-msg{font-size:13px;color:var(--text2);font-weight:600}
+.loading-sub{font-size:11px;color:var(--text3);font-weight:500;min-height:14px;text-align:center;padding:0 30px}
 @keyframes spin{to{transform:rotate(360deg)}}
 
 /* ── SHELL ── */
 #appShell{display:none;flex-direction:column;min-height:100vh}
-.status-bar{height:max(var(--safe-t),20px);background:var(--bg0);flex-shrink:0}
-.top-bar{display:flex;align-items:center;padding:0 18px;height:54px;gap:10px;flex-shrink:0;position:sticky;top:max(var(--safe-t),20px);z-index:100;background:rgba(8,11,20,.88);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border-bottom:1px solid var(--border)}
+.status-bar{height:max(var(--safe-t),20px);background:var(--nav-bg);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);flex-shrink:0;position:sticky;top:0;z-index:101}
+.top-bar{display:flex;align-items:center;padding:0 18px;height:54px;gap:10px;flex-shrink:0;position:sticky;top:max(var(--safe-t),20px);z-index:100;background:var(--nav-bg);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border-bottom:1px solid var(--border)}
 [data-theme="light"] .top-bar{background:rgba(240,242,250,.92)}
 .app-wordmark{font-family:"Fraunces",serif;font-size:19px;font-weight:700;letter-spacing:-.5px}
 .app-wordmark span{color:var(--accent2)}
@@ -2714,8 +2820,8 @@ img{display:block;max-width:100%}
 .avatar-btn{width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:800;cursor:pointer;border:2px solid var(--accent);color:#fff;box-shadow:0 0 0 3px var(--accentbg)}
 
 /* ── SCROLL + TABS ── */
-.scroll-area{flex:1;overflow-y:auto;padding-bottom:calc(80px + var(--safe-b));scroll-behavior:smooth}
-.tab-bar{position:fixed;bottom:0;left:0;right:0;z-index:100;background:rgba(8,11,20,.94);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);border-top:1px solid var(--border);display:flex;align-items:center;padding:0 6px;padding-bottom:max(var(--safe-b),6px);height:calc(64px + max(var(--safe-b),0px))}
+.scroll-area{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior-y:contain;padding-bottom:calc(80px + var(--safe-b));scroll-behavior:smooth}
+.tab-bar{position:fixed;bottom:0;left:0;right:0;z-index:100;background:var(--nav-bg);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);border-top:1px solid var(--border);display:flex;align-items:center;padding:0 6px;padding-bottom:max(var(--safe-b),6px);height:calc(64px + max(var(--safe-b),0px))}
 [data-theme="light"] .tab-bar{background:rgba(240,242,250,.95)}
 .tab-item{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;padding:7px 3px;cursor:pointer;-webkit-tap-highlight-color:transparent;transition:all .18s;position:relative;user-select:none}
 .tab-icon{font-size:19px;transition:transform .2s cubic-bezier(.34,1.56,.64,1)}
@@ -2939,7 +3045,7 @@ img{display:block;max-width:100%}
 /* ── SHEETS ── */
 .overlay{position:fixed;inset:0;z-index:500;background:rgba(0,0,0,.55);backdrop-filter:blur(4px);display:flex;align-items:flex-end;opacity:0;pointer-events:none;transition:opacity .2s}
 .overlay.open{opacity:1;pointer-events:all}
-.sheet{background:var(--bg1);border-radius:var(--r-xl) var(--r-xl) 0 0;width:100%;padding:18px 18px calc(18px + var(--safe-b));transform:translateY(100%);transition:transform .3s cubic-bezier(.4,0,.2,1);max-height:92vh;overflow-y:auto}
+.sheet{background:var(--bg1);border-radius:var(--r-xl) var(--r-xl) 0 0;width:100%;padding:18px 18px calc(18px + var(--safe-b));transform:translateY(100%);transition:transform .3s cubic-bezier(.4,0,.2,1);max-height:92vh;overflow-y:auto;-webkit-overflow-scrolling:touch}
 .overlay.open .sheet{transform:translateY(0)}
 .sheet-handle{width:44px;height:5px;border-radius:3px;background:var(--border2);margin:0 auto 18px;cursor:pointer;padding:8px 20px;box-sizing:content-box;background-clip:content-box;-webkit-tap-highlight-color:transparent}
 .sheet-handle:active{background:var(--accent);background-clip:content-box}
@@ -2948,7 +3054,7 @@ img{display:block;max-width:100%}
 /* ── FIELDS ── */
 .field-group{display:flex;flex-direction:column;gap:4px;flex:1}
 .field-group label,.field-label{font-size:10px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.05em}
-.field-input{background:var(--bg2);border:1.5px solid var(--border2);border-radius:var(--r-s);padding:11px 13px;font-size:14px;font-weight:500;color:var(--text);transition:border-color .15s;-webkit-appearance:none;appearance:none;width:100%}
+.field-input{background:var(--bg2);border:1.5px solid var(--border2);border-radius:var(--r-s);padding:11px 13px;font-size:16px;font-weight:500;color:var(--text);transition:border-color .15s;-webkit-appearance:none;appearance:none;width:100%}
 .field-input:focus{border-color:var(--accent)}
 .field-input::placeholder{color:var(--text3)}
 .field-row{display:flex;gap:9px}
@@ -2975,6 +3081,7 @@ img{display:block;max-width:100%}
 <div id="loadingOverlay">
   <div class="loading-spinner"></div>
   <div class="loading-msg">Cargando...</div>
+  <div class="loading-sub"></div>
 </div>
 
 <!-- ══ AUTH ══ -->
@@ -3201,6 +3308,7 @@ img{display:block;max-width:100%}
         </div>
       </div>
       <div id="debtProjection" style="padding:0 18px 8px"></div>
+      <div id="debtStatement" style="padding:0 18px 8px;display:none"></div>
       <div class="debt-list" id="debtList"></div>
       <div style="height:18px"></div>
     </div>
@@ -3393,13 +3501,16 @@ img{display:block;max-width:100%}
       </div>
       <div class="field-group">
         <label>🔁 Repetir a futuro (opcional)</label>
-        <select class="field-input" id="dRepeat">
+        <select class="field-input" id="dRepeat" onchange="toggleCustomMonths()">
           <option value="1">Solo este mes</option>
           <option value="3">Próximos 3 meses</option>
           <option value="6">Próximos 6 meses</option>
           <option value="12">Próximos 12 meses</option>
           <option value="24">Próximos 24 meses</option>
+          <option value="36">Próximos 36 meses (3 años)</option>
+          <option value="custom">✏️ Cantidad exacta de cuotas...</option>
         </select>
+        <input class="field-input" id="dCustomMonths" type="number" min="1" max="600" placeholder="Ej: 240 (hipotecario a 20 años)" style="display:none;margin-top:8px">
         <div style="font-size:10.5px;color:var(--text3);margin-top:4px">Ideal para dividendos, créditos y cuotas fijas — se crea una deuda por cada mes</div>
       </div>
       <div id="debtPreview" style="background:var(--bg2);border-radius:var(--r-s);padding:10px;font-size:12px;color:var(--text2);display:none"></div>
