@@ -137,6 +137,11 @@ let unsubListeners = [];
 
 function initFirebase() {
   try {
+    // Si la librería Firebase no cargó (preview, sin internet, CDN bloqueado), modo local
+    if (typeof firebase === "undefined") {
+      console.warn("Firebase no cargó — la app funciona en modo local (sin sync entre dispositivos)");
+      db = null; updateSyncUI(); return;
+    }
     if (!FIREBASE_CONFIG.apiKey) { updateSyncUI(); return; }
     firebase.initializeApp(FIREBASE_CONFIG);
     db = firebase.firestore();
@@ -3552,7 +3557,7 @@ img{display:block;max-width:100%}
         </div>
 
         <button class="btn btn-red btn-full" style="margin-top:16px" onclick="doLogout()">↩️ Cerrar sesión</button>
-        <div style="text-align:center;font-size:10px;color:var(--text3);margin-top:14px">ListaJuntos v10</div>
+        <div style="text-align:center;font-size:10px;color:var(--text3);margin-top:14px">ListaJuntos v11</div>
       </div>
     </div>
 
