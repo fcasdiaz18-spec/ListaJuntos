@@ -432,10 +432,28 @@ function loadLocalData() {
   STATE.inventario = LS.get("inv")   || [];
   STATE.debts      = LS.get("debts") || [];
   STATE.boletas    = LS.get("boletas") || [];
-  // Gastos personales por usuario (migra clave antigua exp_<Nombre> si existe)
+  // Gastos personales por usuario — busca en TODAS las claves posibles para no perder datos
   const u = USERS[currentUser.uid];
-  STATE.expenses[currentUser.uid] =
-    LS.get("exp_" + u.name) || LS.get("exp_" + currentUser.uid) || [];
+  const posiblesClaves = [
+    "exp_" + (currentUser.displayName || ""),
+    "exp_" + u.name,
+    "exp_" + currentUser.uid,
+    "exp_user"
+  ];
+  let expRecuperados = [];
+  const vistos = new Set();
+  for (const k of posiblesClaves) {
+    const arr = LS.get(k);
+    if (Array.isArray(arr)) {
+      arr.forEach(e => {
+        const sig = `${e.desc}|${e.amount}|${e.date}`;
+        if (!vistos.has(sig)) { vistos.add(sig); expRecuperados.push(e); }
+      });
+    }
+  }
+  STATE.expenses[currentUser.uid] = expRecuperados;
+  // Re-guardar unificado en la clave estándar
+  if (expRecuperados.length) LS.set("exp_" + (currentUser.displayName || "user"), expRecuperados);
 }
 
 // Helpers de persistencia: escriben en Firestore si hay sync;
@@ -507,16 +525,26 @@ function initSync() {
   syncStarted = true;
   const base = `households/${HOUSEHOLD_ID}`;
 
+  // Fusiona nube + locales-no-subidos, sube los que falten. Nunca pierde datos locales.
+  function mergeSync(cloud, local, sigFn, seededFlag, uploadCol, setSeeded){
+    const cloudSigs = new Set(cloud.map(sigFn));
+    const soloLocales = local.filter(x => !cloudSigs.has(sigFn(x)) && !x._deleted);
+    if (soloLocales.length && !seededFlag) {
+      setSeeded();
+      const items = soloLocales.map(x => { const { id, _pending, ...rest } = x; return rest; });
+      fsAddBatch(uploadCol, items);
+    }
+    const merged = [...cloud];
+    soloLocales.forEach(x => merged.push(x));
+    return merged;
+  }
+
   // Inventario compartido
   unsubListeners.push(db.collection(base + "/inventario").onSnapshot(async snap => {
-    if (snap.empty && STATE.inventario.length && !seededInv) {
-      // Primera conexión: subir el inventario local existente
-      seededInv = true;
-      for (const it of STATE.inventario) { const { id, ...rest } = it; await fsAdd(base + "/inventario", rest); }
-      return;
-    }
-    STATE.inventario = snap.docs.map(d => ({ id: d.id, ...d.data() }))
-      .sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+    const cloud = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    const local = STATE.inventario || LS.get("inv") || [];
+    const merged = mergeSync(cloud, local, i=>`${i.name}|${i.cat}`, seededInv, base+"/inventario", ()=>seededInv=true);
+    STATE.inventario = merged.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
     LS.set("inv", STATE.inventario);
     if (activePage === "inventario") renderInventario();
     if (activePage === "dashboard") renderDashboard();
@@ -525,13 +553,10 @@ function initSync() {
 
   // Gastos del hogar compartidos
   unsubListeners.push(db.collection(base + "/debts").onSnapshot(async snap => {
-    if (snap.empty && STATE.debts.length && !seededDebts) {
-      seededDebts = true;
-      for (const d of STATE.debts) { const { id, ...rest } = d; await fsAdd(base + "/debts", rest); }
-      return;
-    }
-    STATE.debts = snap.docs.map(d => ({ id: d.id, ...d.data() }))
-      .sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+    const cloud = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    const local = STATE.debts || LS.get("debts") || [];
+    const merged = mergeSync(cloud, local, d=>`${d.desc}|${d.amount}|${d.date}|${d.payer}`, seededDebts, base+"/debts", ()=>seededDebts=true);
+    STATE.debts = merged.sort((a, b) => (b.date || "").localeCompare(a.date || ""));
     LS.set("debts", STATE.debts);
     if (activePage === "deudas") renderDeudas();
     if (activePage === "dashboard") renderDashboard();
@@ -541,15 +566,29 @@ function initSync() {
   // Gastos personales del usuario actual (privados, pero persistentes en la nube)
   const myUid = currentUser.uid;
   unsubListeners.push(db.collection(`users/${myUid}/expenses`).onSnapshot(async snap => {
-    if (snap.empty && (STATE.expenses[myUid]||[]).length && !seededExp) {
-      // Primera conexión: subir los gastos locales existentes para no perderlos
+    const cloud = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    const local = STATE.expenses[myUid] || LS.get("exp_"+(currentUser.displayName||"user")) || [];
+
+    // Detectar gastos locales que NO están en la nube (por descripción+monto+fecha)
+    const sig = e => `${e.desc}|${e.amount}|${e.date}`;
+    const cloudSigs = new Set(cloud.map(sig));
+    const soloLocales = local.filter(e => !cloudSigs.has(sig(e)) && !e._deleted);
+
+    // Subir los que falten en la nube (una sola vez, en segundo plano)
+    if (soloLocales.length && !seededExp) {
       seededExp = true;
-      for (const e of STATE.expenses[myUid]) { const { id, ...rest } = e; await fsAdd(`users/${myUid}/expenses`, rest); }
-      return;
+      const items = soloLocales.map(e => { const { id, _pending, ...rest } = e; return rest; });
+      fsAddBatch(`users/${myUid}/expenses`, items); // no await: no bloquea
     }
-    STATE.expenses[myUid] = snap.docs.map(d => ({ id: d.id, ...d.data() }))
-      .sort((a, b) => (b.date || "").localeCompare(a.date || ""));
-    LS.set("exp_" + (currentUser.displayName || "user"), STATE.expenses[myUid]);
+
+    // Fusionar: nube + locales-no-subidos (nunca perder lo local)
+    const merged = [...cloud];
+    const mergedSigs = new Set(cloud.map(sig));
+    soloLocales.forEach(e => { if (!mergedSigs.has(sig(e))) merged.push(e); });
+    merged.sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+
+    STATE.expenses[myUid] = merged;
+    LS.set("exp_" + (currentUser.displayName || "user"), merged);
     if (activePage === "finanzas") renderFinanzas();
     if (activePage === "dashboard") renderDashboard();
   }, e => console.warn("sync exp:", e.message)));
@@ -557,13 +596,11 @@ function initSync() {
   // Ahorros del usuario (privados, persistentes en la nube)
   unsubListeners.push(db.collection(`users/${myUid}/ahorros`).onSnapshot(async snap => {
     if (!STATE.ahorros) STATE.ahorros = {};
-    if (snap.empty && (STATE.ahorros[myUid]||[]).length && !seededAhorro) {
-      seededAhorro = true;
-      for (const a of STATE.ahorros[myUid]) { const { id, ...rest } = a; await fsAdd(`users/${myUid}/ahorros`, rest); }
-      return;
-    }
-    STATE.ahorros[myUid] = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-    LS.set("ahorros_" + myUid, STATE.ahorros[myUid]);
+    const cloud = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    const local = STATE.ahorros[myUid] || LS.get("ahorros_"+myUid) || [];
+    const merged = mergeSync(cloud, local, a=>`${a.desc}|${a.monto}|${a.fecha}`, seededAhorro, `users/${myUid}/ahorros`, ()=>seededAhorro=true);
+    STATE.ahorros[myUid] = merged;
+    LS.set("ahorros_" + myUid, merged);
     if (activePage === "ahorro") renderAhorro();
   }, e => console.warn("sync ahorros:", e.message)));
   unsubListeners.push(db.doc(`users/${myUid}/meta/config`).onSnapshot(snap => {
@@ -4189,7 +4226,7 @@ img{display:block;max-width:100%}
         </div>
 
         <button class="btn btn-red btn-full" style="margin-top:16px" onclick="doLogout()">↩️ Cerrar sesión</button>
-        <div style="text-align:center;font-size:10px;color:var(--text3);margin-top:14px">ListaJuntos v18</div>
+        <div style="text-align:center;font-size:10px;color:var(--text3);margin-top:14px">ListaJuntos v19</div>
       </div>
     </div>
 
