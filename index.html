@@ -1098,8 +1098,12 @@ function renderDashboard() {
   });
   const sharedTotal = sharedDebts.reduce((a,d)=>a+d.amount,0);
   const bal = computeDebtBalances(sharedDebts);
-  // Lo que le corresponde pagar al usuario actual (su parte, no el total del hogar)
-  const miParteHogar = isFel(currentUser.displayName) || currentUser.uid==="felipe" ? bal.fShould : bal.mShould;
+  // Lo que el usuario actual debe SALDAR con su pareja (neto de deudas cruzadas)
+  const soyFelipe = isFel(currentUser.displayName) || currentUser.uid==="felipe";
+  // felipeNet < 0 → Felipe debe; > 0 → le deben a Felipe
+  const miNeto = soyFelipe ? bal.felipeNet : -bal.felipeNet;
+  const deboSaldar = miNeto < 0 ? Math.abs(miNeto) : 0;   // lo que YO debo
+  const meDeben    = miNeto > 0 ? miNeto : 0;              // lo que me deben a mí
 
   const lowInv = STATE.inventario.filter(i=>{
     const d=daysLeft(i); return i.qty===0||(d!==null&&d<=2);
@@ -1108,7 +1112,7 @@ function renderDashboard() {
   // Context ticker (chips clickeables → abren su sección)
   $("contextTicker").innerHTML = [
     {cls:personalTotal>0?"warn":"ok",icon:"💳",text:"Personal",val:clp(personalTotal),go:"finanzas"},
-    {cls:miParteHogar>0?"warn":"ok",icon:"🏠",text:"Mi parte hogar",val:clp(miParteHogar),go:"deudas"},
+    {cls:deboSaldar>0?"warn":"ok",icon:"🏠",text:deboSaldar>0?"Debo al hogar":meDeben>0?"Me deben":"Hogar",val:deboSaldar>0?clp(Math.round(deboSaldar)):meDeben>0?clp(Math.round(meDeben)):"Al día",go:"deudas"},
     {cls:lowInv.length>0?"urgent":"ok",icon:"📦",text:"Stock bajo",val:lowInv.length+" items",go:"inventario"},
     {cls:STATE.debts.filter(d=>!d.paid).length>0?"urgent":"ok",icon:"💸",text:"Deudas",val:STATE.debts.filter(d=>!d.paid).length+" pend.",go:"deudas"},
     {cls:bal.owed<500?"ok":"warn",icon:"⚖️",text:"Balance",val:bal.owed<500?"OK":clp(bal.owed),go:"deudas"},
@@ -1121,9 +1125,9 @@ function renderDashboard() {
   // Stats (clickeables)
   $("statsGrid").innerHTML = `
     <div class="stat-card income" onclick="navTo('deudas')" style="cursor:pointer">
-      <div class="stat-label">Mi parte del hogar</div>
-      <div class="stat-value">${clp(miParteHogar)}</div>
-      <div class="stat-delta" style="color:var(--text2)">de ${clp(sharedTotal)} total · ${sharedDebts.length} gastos</div>
+      <div class="stat-label">${deboSaldar>0?"Debo saldar":meDeben>0?"Me deben":"Hogar"}</div>
+      <div class="stat-value ${deboSaldar>0?"neg":meDeben>0?"pos":""}">${deboSaldar>0?clp(Math.round(deboSaldar)):meDeben>0?clp(Math.round(meDeben)):"Al día"}</div>
+      <div class="stat-delta" style="color:var(--text2)">${deboSaldar>0?"le debes a Meli":meDeben>0?"Meli te debe":"cuentas equilibradas"}</div>
     </div>
     <div class="stat-card expenses" onclick="navTo('finanzas')" style="cursor:pointer">
       <div class="stat-label">Personal (${name_})</div>
@@ -2509,14 +2513,28 @@ let debtMonth=new Date().getMonth(); // 0-11, para navegación mensual
 // Balance absoluto Felipe vs Meli (independiente de quién esté logueado)
 function computeDebtBalances(list){
   let fPaid=0,mPaid=0,fShould=0,mShould=0;
+  // Deudas cruzadas explícitas: cuánto le debe cada uno al otro por gasto
+  let felipeDebeAMeli=0, meliDebeAFelipe=0;
   list.filter(d=>!d.paid).forEach(d=>{
     if(isFel(d.payer)) fPaid+=d.amount; else mPaid+=d.amount;
-    if(d.owed==="Mitad"){ fShould+=d.amount/2; mShould+=d.amount/2; }
-    else if(isFel(d.owed)) fShould+=d.amount;
-    else mShould+=d.amount;
+    if(d.owed==="Mitad"){
+      fShould+=d.amount/2; mShould+=d.amount/2;
+      // El que NO pagó le debe su mitad al que pagó
+      if(isFel(d.payer)) meliDebeAFelipe+=d.amount/2;
+      else felipeDebeAMeli+=d.amount/2;
+    } else if(d.owed===d.payer){
+      // "Sin deuda para el otro": el gasto es solo de quien pagó
+      if(isFel(d.payer)) fShould+=d.amount; else mShould+=d.amount;
+    } else if(isFel(d.owed)){
+      fShould+=d.amount;
+      if(!isFel(d.payer)) felipeDebeAMeli+=d.amount; // Meli pagó, Felipe debe todo
+    } else {
+      mShould+=d.amount;
+      if(isFel(d.payer)) meliDebeAFelipe+=d.amount; // Felipe pagó, Meli debe todo
+    }
   });
   const felipeNet=fPaid-fShould, owed=Math.abs(felipeNet);
-  return {fPaid,mPaid,fShould,mShould,felipeNet,owed,totalFelipe:fPaid,totalMelisa:mPaid};
+  return {fPaid,mPaid,fShould,mShould,felipeNet,owed,totalFelipe:fPaid,totalMelisa:mPaid,felipeDebeAMeli,meliDebeAFelipe};
 }
 
 function setDebtPeriod(p,el){
@@ -2651,16 +2669,23 @@ function renderDeudas(){
         <div class="dh-avatar" style="background:linear-gradient(135deg,#6B4EFF,#4E9FFF)">F</div>
         <div class="dh-name">Felipe</div>
         <div class="dh-paid" style="color:var(--accent)">${clp(bal.fPaid)}</div>
-        <div class="dh-should">Le tocaba ${clp(Math.round(bal.fShould))}</div>
+        <div class="dh-should">pagó este período</div>
       </div>
       <div class="dh-vs">vs</div>
       <div class="dh-user">
         <div class="dh-avatar" style="background:linear-gradient(135deg,#FF6B9A,#FF6B6B)">M</div>
         <div class="dh-name">Meli</div>
         <div class="dh-paid" style="color:#FF6B9A">${clp(bal.mPaid)}</div>
-        <div class="dh-should">Le tocaba ${clp(Math.round(bal.mShould))}</div>
+        <div class="dh-should">pagó este período</div>
       </div>
-    </div>`;
+    </div>
+    ${(bal.felipeDebeAMeli>0||bal.meliDebeAFelipe>0)?`
+    <div class="debt-cross">
+      <div class="dcross-title">Cómo se reparte:</div>
+      ${bal.felipeDebeAMeli>0?`<div class="dcross-row"><span>Felipe le debe a Meli</span><span style="color:var(--accent)">${clp(Math.round(bal.felipeDebeAMeli))}</span></div>`:""}
+      ${bal.meliDebeAFelipe>0?`<div class="dcross-row"><span>Meli le debe a Felipe</span><span style="color:#FF6B9A">${clp(Math.round(bal.meliDebeAFelipe))}</span></div>`:""}
+      <div class="dcross-net"><span>Neto (se compensan)</span><span>${bal.owed<500?"🤝 A mano":`${bal.felipeNet<0?"Felipe":"Meli"} paga ${clp(Math.round(bal.owed))}`}</span></div>
+    </div>`:""}`;
 
   $("debtBalancePill").innerHTML=bal.owed<500
     ?`<div class="debt-balance-pill dbp-ok">🤝 Balance equilibrado — diferencia menor a $500</div>`
@@ -3453,6 +3478,10 @@ img{display:block;max-width:100%}
 .ah-meta{font-size:11px;color:var(--text3);margin-top:2px}
 .ah-right{text-align:right;display:flex;flex-direction:column;align-items:flex-end;gap:4px}
 .ah-amount{font-size:15px;font-weight:800;color:#10B981;font-family:"Fraunces",serif}
+.debt-cross{margin-top:14px;padding-top:12px;border-top:1px solid var(--border)}
+.dcross-title{font-size:11px;font-weight:800;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px}
+.dcross-row{display:flex;justify-content:space-between;font-size:13px;font-weight:600;padding:4px 0}
+.dcross-net{display:flex;justify-content:space-between;font-size:13.5px;font-weight:800;padding:8px 0 2px;margin-top:4px;border-top:1px dashed var(--border2)}
 .of-card{display:flex;align-items:center;gap:11px;background:var(--sur);border:1px solid var(--border);border-radius:var(--r);padding:12px 14px;margin:0 18px 9px;box-shadow:var(--sh)}
 .of-super{font-size:9.5px;font-weight:800;border-radius:7px;padding:4px 7px;flex-shrink:0;text-transform:uppercase;letter-spacing:.3px}
 .of-info{flex:1;min-width:0}
@@ -4074,7 +4103,7 @@ img{display:block;max-width:100%}
         </div>
 
         <button class="btn btn-red btn-full" style="margin-top:16px" onclick="doLogout()">↩️ Cerrar sesión</button>
-        <div style="text-align:center;font-size:10px;color:var(--text3);margin-top:14px">ListaJuntos v16</div>
+        <div style="text-align:center;font-size:10px;color:var(--text3);margin-top:14px">ListaJuntos v17</div>
       </div>
     </div>
 
