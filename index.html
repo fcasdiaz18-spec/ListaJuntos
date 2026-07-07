@@ -1335,27 +1335,77 @@ function renderFinanzas() {
     list.innerHTML=`<div class="empty-state"><div class="es-icon">💳</div><div class="es-title">Sin gastos registrados</div><div class="es-sub">Toca "+ Gasto" o carga tu estado de cuenta</div></div>`;
     return;
   }
-  list.innerHTML=[...filtered].slice(0,50).map(e=>{
-    const cat=PRIVATE_CATS.find(c=>c.id===e.cat)||{emoji:"📦",label:"Otro",color:"#9BA3C2"};
-    const serie=e.groupId?STATE.expenses[uid_].filter(x=>x.groupId===e.groupId).length:0;
-    return `<div class="expense-item">
+  // Agrupar series: mostrar una fila por serie (colapsada), gastos sueltos normales
+  const grupos={}; const sueltos=[];
+  [...filtered].forEach(e=>{ if(e.groupId){ (grupos[e.groupId]=grupos[e.groupId]||[]).push(e); } else sueltos.push(e); });
+  // Construir lista mixta ordenada por fecha
+  const filas=[];
+  Object.values(grupos).forEach(serie=>{
+    serie.sort((a,b)=>(a.date||"").localeCompare(b.date||""));
+    filas.push({tipo:"serie", serie, date:serie[0].date});
+  });
+  sueltos.forEach(e=>filas.push({tipo:"suelto", e, date:e.date}));
+  filas.sort((a,b)=>(b.date||"").localeCompare(a.date||""));
+
+  const now=today().slice(0,7);
+  list.innerHTML=filas.slice(0,60).map(f=>{
+    if(f.tipo==="suelto"){
+      const e=f.e;
+      const cat=PRIVATE_CATS.find(c=>c.id===e.cat)||{emoji:"📦",label:"Otro",color:"#9BA3C2"};
+      return `<div class="expense-item">
+        <div class="exp-icon" style="background:${cat.color}22;color:${cat.color}">${cat.emoji}</div>
+        <div class="exp-info">
+          <div class="exp-name">${e.desc}</div>
+          <div class="exp-cat">${cat.label}${e.aiGenerated?" · 🤖 IA":""}</div>
+        </div>
+        <div class="exp-right">
+          <div class="exp-amount">-${clp(e.amount)}</div>
+          <div class="exp-date">${e.date}</div>
+          <div style="display:flex;gap:4px;margin-top:3px">
+            <button class="btn-del-tiny" onclick="openEditExpense('${e.id}')" title="Editar">✏️</button>
+            <button class="btn-del-tiny" onclick="deleteExpense('${e.id}')" title="Eliminar">🗑️</button>
+          </div>
+        </div>
+      </div>`;
+    }
+    // Serie colapsada
+    const serie=f.serie;
+    const cat=PRIVATE_CATS.find(c=>c.id===serie[0].cat)||{emoji:"📦",label:"Otro",color:"#9BA3C2"};
+    const total=serie.length;
+    // Cuota "actual": la del mes en curso, o la primera pendiente
+    const actualIdx=Math.max(0, serie.findIndex(x=>(x.date||"").startsWith(now)));
+    const cuotaNum=actualIdx+1;
+    const gid=serie[0].groupId;
+    const abierta=expandedSeries.has(gid);
+    const nombreBase=serie[0].desc.replace(/\s*\(\d+\/\d+\)/,"");
+    const sumTotal=serie.reduce((a,x)=>a+x.amount,0);
+    let html=`<div class="expense-item serie-head" onclick="toggleSerie('${gid}')">
       <div class="exp-icon" style="background:${cat.color}22;color:${cat.color}">${cat.emoji}</div>
       <div class="exp-info">
-        <div class="exp-name">${e.desc}</div>
-        <div class="exp-cat">${cat.label}${e.aiGenerated?" · 🤖 IA":""}${serie?` · 🔁 x${serie}`:""}</div>
+        <div class="exp-name">${nombreBase} <span class="serie-badge">cuota ${cuotaNum}/${total}</span></div>
+        <div class="exp-cat">${cat.label} · 🔁 ${total} cuotas · total ${clp(sumTotal)} ${abierta?"▲":"▼"}</div>
       </div>
       <div class="exp-right">
-        <div class="exp-amount">-${clp(e.amount)}</div>
-        <div class="exp-date">${e.date}</div>
-        <div style="display:flex;gap:4px;margin-top:3px">
-          <button class="btn-del-tiny" onclick="openEditExpense('${e.id}')" title="Editar">✏️</button>
-          <button class="btn-del-tiny" onclick="deleteExpense('${e.id}')" title="Eliminar">🗑️</button>
-          ${serie?`<button class="btn-del-tiny" onclick="deleteExpenseSeries('${e.groupId}')" title="Borrar serie">🔁🗑️</button>`:""}
-        </div>
+        <div class="exp-amount">-${clp(serie[actualIdx].amount)}</div>
+        <div class="exp-date">${serie[actualIdx].date}</div>
+        <button class="btn-del-tiny" onclick="event.stopPropagation();deleteExpenseSeries('${gid}')" title="Borrar toda la serie">🔁🗑️</button>
       </div>
     </div>`;
+    if(abierta){
+      html+=`<div class="serie-detalle">`+serie.map((e,i)=>`
+        <div class="serie-cuota ${(e.date||"").startsWith(now)?"actual":""}">
+          <span class="sc-num">${i+1}/${total}</span>
+          <span class="sc-date">${e.date}</span>
+          <span class="sc-amount">-${clp(e.amount)}</span>
+          <button class="btn-del-tiny" onclick="deleteExpense('${e.id}')" title="Borrar solo esta">🗑️</button>
+        </div>`).join("")+`</div>`;
+    }
+    return html;
   }).join("");
 }
+
+let expandedSeries=new Set();
+function toggleSerie(gid){ if(expandedSeries.has(gid)) expandedSeries.delete(gid); else expandedSeries.add(gid); renderFinanzas(); }
 
 function selectFinCat(id){ selectedFinCat=(id===null||selectedFinCat===id)?null:id; renderFinanzas(); }
 
@@ -1608,11 +1658,14 @@ function renderProjection(allExp){
 // ── Donut interactivo de gastos personales ──
 function renderFinDonut(allExp){
   const svg=$("finDonutSvg"); if(!svg) return;
+  const esHipot=e=>e.cat==="credito_hip"||/hipotec|dividendo/i.test(e.desc||"");
+  const expSinHip=allExp.filter(e=>!esHipot(e));
+  const expHip=allExp.filter(e=>esHipot(e));
   const totals={};
-  allExp.forEach(e=>{ totals[e.cat]=(totals[e.cat]||0)+e.amount; });
-  const totalAll=allExp.reduce((a,e)=>a+e.amount,0)||0;
+  expSinHip.forEach(e=>{ totals[e.cat]=(totals[e.cat]||0)+e.amount; });
+  const totalAll=expSinHip.reduce((a,e)=>a+e.amount,0)||0;
   const C=2*Math.PI*52;
-  const segs=PRIVATE_CATS.filter(c=>(totals[c.id]||0)>0);
+  const segs=PRIVATE_CATS.filter(c=>c.id!=="credito_hip"&&(totals[c.id]||0)>0);
   let acc=0, circles="";
   segs.forEach(c=>{
     const frac=totals[c.id]/totalAll;
@@ -1625,19 +1678,53 @@ function renderFinDonut(allExp){
     acc+=frac*C;
   });
   svg.innerHTML=`<circle cx="65" cy="65" r="52" fill="none" stroke="var(--bg3)" stroke-width="17"/>`+circles;
-  // Animación: los arcos crecen desde 0 en cada actualización
   requestAnimationFrame(()=>requestAnimationFrame(()=>{
     svg.querySelectorAll("circle[data-target]").forEach(el=>el.setAttribute("stroke-dasharray",el.dataset.target));
   }));
   const selCat=PRIVATE_CATS.find(c=>c.id===selectedFinCat);
   $("finDonutVal").textContent=clp(selCat?(totals[selCat.id]||0):totalAll);
-  $("finDonutLbl").textContent=selCat?selCat.emoji+" "+selCat.label.split(" ")[0]:"Todos";
+  $("finDonutLbl").textContent=selCat?selCat.emoji+" "+selCat.label.split(" ")[0]:"Sin hipot.";
   $("finDonutLegend").innerHTML=segs.length?[...segs].sort((a,b)=>totals[b.id]-totals[a.id]).map(c=>`
     <div class="dleg" style="cursor:pointer;opacity:${selectedFinCat&&selectedFinCat!==c.id?.4:1}" onclick="selectFinCat('${c.id}')">
       <div class="dleg-dot" style="background:${c.color}"></div>
       <div class="dleg-name">${c.emoji} ${c.label}</div>
       <div class="dleg-amt">${clp(totals[c.id])} · ${Math.round(totals[c.id]/totalAll*100)}%</div>
     </div>`).join(""):`<div style="font-size:12px;color:var(--text3)">Agrega tu primer gasto para ver el gráfico 🍩</div>`;
+
+  // ── Dona separada del hipotecario (seguimiento aparte) ──
+  const hipBox=$("hipDonutCard");
+  if(hipBox){
+    const totalHip=expHip.reduce((a,e)=>a+e.amount,0);
+    if(totalHip>0){
+      // Cuánto se ha "avanzado": cuotas pagadas vs total (si hay cuota/cuotasTotal)
+      const conCuota=expHip.find(e=>e.cuotasTotal);
+      const totalCuotas=conCuota?conCuota.cuotasTotal:expHip.length;
+      const now=today().slice(0,7);
+      const pagadas=expHip.filter(e=>(e.date||"")<now).length;
+      const frac=totalCuotas?Math.min(pagadas/totalCuotas,1):0;
+      const Ch=2*Math.PI*34;
+      const lenH=frac*Ch;
+      hipBox.style.display="block";
+      hipBox.innerHTML=`
+        <div class="donut-title">🏠 Hipotecario</div>
+        <div class="hipdon-wrap">
+          <svg viewBox="0 0 90 90" class="hipdon-svg">
+            <circle cx="45" cy="45" r="34" fill="none" stroke="var(--bg3)" stroke-width="12"/>
+            <circle cx="45" cy="45" r="34" fill="none" stroke="#6B4EFF" stroke-width="12"
+              stroke-dasharray="${lenH} ${Ch-lenH}" stroke-dashoffset="0" transform="rotate(-90 45 45)" stroke-linecap="round"/>
+          </svg>
+          <div class="hipdon-center">
+            <div class="hipdon-pct">${Math.round(frac*100)}%</div>
+            <div class="hipdon-sub">pagado</div>
+          </div>
+        </div>
+        <div class="hipdon-info">
+          <div class="hipdon-row"><span>Cuota mensual</span><span>${clp(conCuota?conCuota.amount:Math.round(totalHip/Math.max(expHip.length,1)))}</span></div>
+          <div class="hipdon-row"><span>Cuotas</span><span>${pagadas}/${totalCuotas}</span></div>
+          <div class="hipdon-row"><span>Restante</span><span>${clp(totalHip - expHip.filter(e=>(e.date||"")<now).reduce((a,e)=>a+e.amount,0))}</span></div>
+        </div>`;
+    } else { hipBox.style.display="none"; hipBox.innerHTML=""; }
+  }
 }
 
 // ── Chips de categoría en el sheet de agregar gasto ──
@@ -1911,6 +1998,7 @@ ${estadoCuentaText.trim()?"ESTADO DE CUENTA (texto):\n"+estadoCuentaText.slice(0
     }
     // Guardar la proyección de meses futuros para poder agregarla al historial
     window._lastProyeccion = parsed.proyeccionMeses || [];
+    localStorage.setItem("lj6_proy_"+currentUser.uid, JSON.stringify(window._lastProyeccion));
     estadoImages=[]; // liberar memoria
     renderFinanzas(); renderDashboard();
   } catch(err){
@@ -1989,21 +2077,30 @@ function marcarTarjetaPagada(){
 
 // Agregar un mes proyectado como deuda personal en el historial
 async function addProyeccionMes(idx, btn){
-  const p=(window._lastProyeccion||[])[idx];
-  if(!p||!p.monto){ toast("Sin monto para agregar","error"); return; }
+  let proy = window._lastProyeccion;
+  if(!proy || !proy.length){
+    try{ proy = JSON.parse(localStorage.getItem("lj6_proy_"+currentUser.uid)||"[]"); window._lastProyeccion=proy; }catch(e){ proy=[]; }
+  }
+  const p=proy[idx];
+  if(!p||!p.monto){ toast("No se pudo leer el mes. Vuelve a analizar el estado de cuenta.","error"); return; }
   const uid_=currentUser.uid;
   const mesNum=MESES_NUM[String(p.mes||"").toLowerCase()];
   const anio=p.anio||new Date().getFullYear();
   const dateStr=(mesNum!==undefined)?`${anio}-${String(mesNum+1).padStart(2,"0")}-15`:today();
   if(!STATE.expenses[uid_]) STATE.expenses[uid_]=[];
   const newExp={desc:`Cuota tarjeta ${p.mes}${p.detalle?" · "+p.detalle:""}`,amount:Math.abs(p.monto),cat:"tarjeta",date:dateStr,addedBy:uid_,aiGenerated:true};
-  const newId=await fsAdd(`users/${uid_}/expenses`,newExp);
-  STATE.expenses[uid_].unshift({id:newId,...newExp});
+  // Mostrar al instante, subir en segundo plano
+  const localId=uid();
+  STATE.expenses[uid_].unshift({id:localId,...newExp});
   LS.set("exp_"+(currentUser.displayName||"user"),STATE.expenses[uid_]);
-  // Feedback visual en el botón
   if(btn){ btn.textContent="✓ Agregado"; btn.classList.remove("btn-accent"); btn.classList.add("btn-green"); btn.disabled=true; btn.style.opacity=".7"; }
   renderDashboard();
   toast(`✅ ${p.mes}: ${clp(p.monto)} agregado a tu historial`);
+  if(db && syncOn){
+    fsAdd(`users/${uid_}/expenses`,newExp).then(realId=>{
+      const it=STATE.expenses[uid_].find(x=>x.id===localId); if(it&&realId){ it.id=realId; LS.set("exp_"+(currentUser.displayName||"user"),STATE.expenses[uid_]); }
+    });
+  }
 }
 
 async function addAllProyeccion(){
@@ -3327,7 +3424,8 @@ Object.assign(window, {
   removeDebtSeries, renderFinanzas, renderOfertas, restockItem, runInsights, runMonthSummary, selectFinCat,
   selectSheetCat, setBudget, setDebtMonths, setDebtPeriod, setExpMonths, setIncome,
   shiftDebtMonth, stopCamera, toggleDebt, toggleDebtSeries, toggleExcludeHip, yearsToMonths,
-  addAhorro, deleteAhorro, renderAhorro, toggleAhInteres, filterOfCat, renderOfertas, cancelLoading
+  addAhorro, deleteAhorro, renderAhorro, toggleAhInteres, filterOfCat, renderOfertas, cancelLoading,
+  toggleSerie, addProyeccionMes, addAllProyeccion, marcarTarjetaPagada
 });
 
 </script>
@@ -3737,6 +3835,22 @@ img{display:block;max-width:100%}
 .expense-list{padding:0 18px;display:flex;flex-direction:column;gap:9px}
 .expense-item{display:flex;align-items:center;gap:12px;background:var(--sur);border:1px solid var(--border);border-radius:var(--r);padding:12px 14px;transition:all .15s}
 .expense-item:active{transform:scale(.98)}
+.serie-head{cursor:pointer}
+.serie-badge{font-size:10px;font-weight:800;background:var(--accentbg);color:var(--accent2);padding:2px 7px;border-radius:10px;margin-left:4px}
+.serie-detalle{margin:0 0 8px;padding:4px 14px 8px;background:var(--bg2);border-radius:0 0 var(--r) var(--r)}
+.serie-cuota{display:flex;align-items:center;gap:10px;padding:7px 0;border-top:1px solid var(--border);font-size:12.5px}
+.serie-cuota.actual{font-weight:800;color:var(--accent2)}
+.sc-num{font-weight:700;color:var(--text3);min-width:42px}
+.sc-date{flex:1;color:var(--text2)}
+.sc-amount{font-weight:700}
+.hipdon-wrap{position:relative;width:90px;height:90px;margin:0 auto}
+.hipdon-svg{width:90px;height:90px}
+.hipdon-center{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center}
+.hipdon-pct{font-size:20px;font-weight:800;font-family:"Fraunces",serif;color:#6B4EFF}
+.hipdon-sub{font-size:9px;color:var(--text3);font-weight:600}
+.hipdon-info{margin-top:12px}
+.hipdon-row{display:flex;justify-content:space-between;font-size:12px;font-weight:600;padding:4px 0;border-top:1px solid var(--border)}
+.hipdon-row:first-child{border-top:none}
 .exp-icon{width:38px;height:38px;border-radius:11px;display:flex;align-items:center;justify-content:center;font-size:17px;flex-shrink:0}
 .exp-info{flex:1;min-width:0}
 .exp-name{font-size:13px;font-weight:600}
@@ -4024,6 +4138,8 @@ img{display:block;max-width:100%}
         </div>
       </div>
 
+      <div class="fin-donut-card" id="hipDonutCard" style="display:none"></div>
+
       <div class="proj-card" id="projCard"></div>
 
       <div id="trendCard" class="trend-card"></div>
@@ -4226,7 +4342,7 @@ img{display:block;max-width:100%}
         </div>
 
         <button class="btn btn-red btn-full" style="margin-top:16px" onclick="doLogout()">↩️ Cerrar sesión</button>
-        <div style="text-align:center;font-size:10px;color:var(--text3);margin-top:14px">ListaJuntos v19</div>
+        <div style="text-align:center;font-size:10px;color:var(--text3);margin-top:14px">ListaJuntos v20</div>
       </div>
     </div>
 
