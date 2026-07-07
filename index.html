@@ -1253,7 +1253,7 @@ function renderDashboard() {
 const PRIVATE_CATS = [
   // Deudas y créditos
   {id:"credito_hip",  label:"Crédito Hipotecario", emoji:"🏠",color:"#6B4EFF", grupo:"deuda"},
-  {id:"credito_con",  label:"Crédito Consumo",     emoji:"💳",color:"#4E9FFF", grupo:"deuda"},
+  {id:"credito_con",  label:"Crédito Consumo",     emoji:"🏦",color:"#4E9FFF", grupo:"deuda"},
   {id:"credito_auto", label:"Crédito Automotriz",  emoji:"🚙",color:"#5B8DEF", grupo:"deuda"},
   {id:"tarjeta",      label:"Tarjeta de Crédito",  emoji:"💳",color:"#7C6CFF", grupo:"deuda"},
   {id:"deuda_pers",   label:"Deuda Personal",       emoji:"👤",color:"#FF6B9A", grupo:"deuda"},
@@ -1282,6 +1282,9 @@ const PRIVATE_CATS = [
 ];
 
 let selectedFinCat = null;
+let finMonthMode = "all"; // "all" o "month"
+let finViewYear = new Date().getFullYear();
+let finViewMonth = new Date().getMonth();
 let sheetExpCat    = null;
 
 function renderFinanzas() {
@@ -1310,6 +1313,14 @@ function renderFinanzas() {
 
   const searchTerm=($("expSearch")?.value||"").trim().toLowerCase();
   let filtered = selectedFinCat ? allExp.filter(e=>e.cat===selectedFinCat) : allExp;
+  // Filtro por mes (si está activo el modo mes)
+  if(finMonthMode==="month"){
+    const key=finViewYear+"-"+String(finViewMonth+1).padStart(2,"0");
+    filtered=filtered.filter(e=>(e.date||"").startsWith(key));
+  }
+  // Actualizar etiqueta del navegador
+  const lbl=$("finMonthLabel");
+  if(lbl) lbl.textContent = finMonthMode==="month" ? `${MESES[finViewMonth]} ${finViewYear}` : "Todos los meses";
   if(searchTerm) filtered=filtered.filter(e=>(e.desc||"").toLowerCase().includes(searchTerm));
   const total    = filtered.reduce((a,e)=>a+e.amount,0);
 
@@ -1408,6 +1419,21 @@ let expandedSeries=new Set();
 function toggleSerie(gid){ if(expandedSeries.has(gid)) expandedSeries.delete(gid); else expandedSeries.add(gid); renderFinanzas(); }
 
 function selectFinCat(id){ selectedFinCat=(id===null||selectedFinCat===id)?null:id; renderFinanzas(); }
+
+function setFinMonthMode(mode, el){
+  finMonthMode=mode;
+  document.querySelectorAll(".fin-month-pills .filter-pill").forEach(p=>p.classList.remove("on"));
+  if(el) el.classList.add("on");
+  if(mode==="month"){ finViewYear=new Date().getFullYear(); finViewMonth=new Date().getMonth(); }
+  renderFinanzas();
+}
+function shiftFinMonth(delta){
+  if(finMonthMode!=="month"){ setFinMonthMode("month", $("fpill-month")); }
+  finViewMonth+=delta;
+  if(finViewMonth<0){ finViewMonth=11; finViewYear--; }
+  else if(finViewMonth>11){ finViewMonth=0; finViewYear++; }
+  renderFinanzas();
+}
 
 // ── Ingreso mensual + proyección de fin de mes ──
 function getIncome(){ return parseCLP(localStorage.getItem("lj6_income_"+currentUser.uid)); }
@@ -1745,7 +1771,12 @@ function openAddExpense(){
   editingExpId=null;
   $("expSheetTitle").textContent="Registrar gasto personal";
   $("expSubmitBtn").textContent="Registrar gasto";
-  $("expDesc").value=""; $("expAmount").value=""; $("expDate").value=today();
+  $("expDesc").value=""; $("expAmount").value="";
+  // Si estoy viendo un mes específico, preseleccionar ese mes para el nuevo gasto
+  if(finMonthMode==="month"){
+    const dia=String(Math.min(new Date().getDate(),28)).padStart(2,"0");
+    $("expDate").value=`${finViewYear}-${String(finViewMonth+1).padStart(2,"0")}-${dia}`;
+  } else { $("expDate").value=today(); }
   $("expRepeatMonths").value=""; $("expRepeatWrap").style.display="block";
   sheetExpCat=null; renderExpSheetCats();
   openSheet("addExpense");
@@ -3209,7 +3240,9 @@ function lowStockItems(){
 function renderResumenBanner(){
   const banner=$("reminderBanner"); if(!banner) return;
   const low=lowStockItems();
-  const pend=STATE.debts.filter(d=>!d.paid);
+  const mesActual=today().slice(0,7);
+  // Solo gastos pendientes del mes en curso (no cuotas futuras)
+  const pend=STATE.debts.filter(d=>!d.paid && (d.date||"").startsWith(mesActual));
   const pendTotal=pend.reduce((a,d)=>a+d.amount,0);
   if(!low.length&&!pend.length){ banner.innerHTML=""; banner.style.display="none"; return; }
   let rows="";
@@ -3224,8 +3257,8 @@ function renderResumenBanner(){
   if(pend.length) rows+=`<div class="resumen-row">
       <span style="font-size:17px">💸</span>
       <div style="flex:1;min-width:0">
-        <div class="resumen-t">${pend.length} gasto${pend.length===1?"":"s"} del hogar pendiente${pend.length===1?"":"s"}</div>
-        <div class="resumen-s">Total por saldar: ${clp(pendTotal)}</div>
+        <div class="resumen-t">${pend.length} gasto${pend.length===1?"":"s"} del hogar de este mes</div>
+        <div class="resumen-s">Pendiente en ${MESES[new Date().getMonth()]}: ${clp(pendTotal)}</div>
       </div>
       <button class="btn btn-accent btn-sm" onclick="navTo('deudas')">Ver</button>
     </div>`;
@@ -3379,7 +3412,16 @@ function updateBadges(){
 // ══════════════════════════════════════════════════
 //  SHEETS
 // ══════════════════════════════════════════════════
-function openSheet(id){ $("sheet-"+id).classList.add("open"); if(id==="addDebt"&&$("dDate")&&!$("dDate").value)$("dDate").value=today(); }
+function openSheet(id){
+  $("sheet-"+id).classList.add("open");
+  if(id==="addDebt"&&$("dDate")){
+    // Preseleccionar el mes que se está viendo en el navegador (para asignar a agosto, etc.)
+    if(typeof debtPeriod!=="undefined" && debtPeriod==="month" && typeof debtYear!=="undefined"){
+      const dia=String(Math.min(new Date().getDate(),28)).padStart(2,"0");
+      $("dDate").value=`${debtYear}-${String(debtMonth+1).padStart(2,"0")}-${dia}`;
+    } else if(!$("dDate").value){ $("dDate").value=today(); }
+  }
+}
 function closeSheet(id){ $("sheet-"+id).classList.remove("open"); if(id==="addExpense"){ editingExpId=null; const w=$("expRepeatWrap"); if(w)w.style.display="block"; } }
 function closeSheetIfBack(e,id){ if(e.target===$("sheet-"+id)) closeSheet(id); }
 
@@ -3425,7 +3467,8 @@ Object.assign(window, {
   selectSheetCat, setBudget, setDebtMonths, setDebtPeriod, setExpMonths, setIncome,
   shiftDebtMonth, stopCamera, toggleDebt, toggleDebtSeries, toggleExcludeHip, yearsToMonths,
   addAhorro, deleteAhorro, renderAhorro, toggleAhInteres, filterOfCat, renderOfertas, cancelLoading,
-  toggleSerie, addProyeccionMes, addAllProyeccion, marcarTarjetaPagada
+  toggleSerie, addProyeccionMes, addAllProyeccion, marcarTarjetaPagada,
+  setFinMonthMode, shiftFinMonth
 });
 
 </script>
@@ -3851,6 +3894,10 @@ img{display:block;max-width:100%}
 .hipdon-info{margin-top:12px}
 .hipdon-row{display:flex;justify-content:space-between;font-size:12px;font-weight:600;padding:4px 0;border-top:1px solid var(--border)}
 .hipdon-row:first-child{border-top:none}
+.fin-month-nav{display:flex;align-items:center;justify-content:space-between;margin:0 18px 8px;background:var(--sur);border:1px solid var(--border);border-radius:var(--r-l);padding:8px 14px;box-shadow:var(--sh)}
+.fin-month-label{font-size:15px;font-weight:800;font-family:"Fraunces",serif}
+.fin-month-pills{display:flex;gap:8px;padding:0 18px 12px}
+.fin-month-pills .filter-pill{flex:0 0 auto}
 .exp-icon{width:38px;height:38px;border-radius:11px;display:flex;align-items:center;justify-content:center;font-size:17px;flex-shrink:0}
 .exp-info{flex:1;min-width:0}
 .exp-name{font-size:13px;font-weight:600}
@@ -4122,6 +4169,16 @@ img{display:block;max-width:100%}
       </div>
       <div class="priv-indicator">🔒 Datos privados — solo visibles en tu sesión</div>
 
+      <div class="fin-month-nav">
+        <button class="month-nav-btn" onclick="shiftFinMonth(-1)">‹</button>
+        <div class="fin-month-label" id="finMonthLabel">Julio 2026</div>
+        <button class="month-nav-btn" onclick="shiftFinMonth(1)">›</button>
+      </div>
+      <div class="fin-month-pills">
+        <div class="filter-pill" id="fpill-month" onclick="setFinMonthMode('month',this)">Mes</div>
+        <div class="filter-pill on" id="fpill-all" onclick="setFinMonthMode('all',this)">Todos</div>
+      </div>
+
       <div class="fin-ai-row">
         <button class="fin-ai-btn" onclick="runMonthSummary()">📅 Resumen del mes</button>
         <button class="fin-ai-btn" onclick="runInsights()">🤖 Insights IA</button>
@@ -4342,7 +4399,7 @@ img{display:block;max-width:100%}
         </div>
 
         <button class="btn btn-red btn-full" style="margin-top:16px" onclick="doLogout()">↩️ Cerrar sesión</button>
-        <div style="text-align:center;font-size:10px;color:var(--text3);margin-top:14px">ListaJuntos v20</div>
+        <div style="text-align:center;font-size:10px;color:var(--text3);margin-top:14px">ListaJuntos v22</div>
       </div>
     </div>
 
