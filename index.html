@@ -118,13 +118,13 @@ const PWD_SALT = "lj6|";
 const USERS = {
   felipe: {
     uid: "felipe", name: "Felipe", role: "admin",
-    avatar: "F", color: "linear-gradient(135deg,#6B4EFF,#4E9FFF)",
+    avatar: "👨", color: "linear-gradient(135deg,#6B4EFF,#4E9FFF)",
     // hash SHA-256 de la contraseña inicial (Felipe123)
     defaultHash: "fcfabceae50b41b7862c42e6a7c9ee8e1b4c63bfa44a496caad8646b187057a9"
   },
   melisa: {
     uid: "melisa", name: "Melisa", role: "user",
-    avatar: "M", color: "linear-gradient(135deg,#FF6B9A,#FF6B6B)",
+    avatar: "👩", color: "linear-gradient(135deg,#FF6B9A,#FF6B6B)",
     // hash SHA-256 de la contraseña inicial (Meli123)
     defaultHash: "5a9e0a1d6ab22fb534a970c64bd48ab4444cde6d83ba08602e9766f307ff4ff7"
   }
@@ -1230,7 +1230,7 @@ function renderDashboard() {
   const catTotals={};
   sharedDebts.forEach(d=>{catTotals[d.cat]=(catTotals[d.cat]||0)+d.amount;});
   const catList=Object.entries(catTotals).sort((a,b)=>b[1]-a[1]).slice(0,5);
-  const CAT_EM={"Supermercado":"🛒","Servicios":"💡","Arriendo":"🏠","Salidas":"🍽️","Salud":"🏥","Transporte":"🚗","Otro":"📦"};
+  const CAT_EM={"Supermercado":"🛒","Servicios":"💡","Arriendo":"🏠","Electrodomestico":"🔌","Salidas":"🍽️","Salud":"🏥","Transporte":"🚗","Mascotas":"🐾","Aseo":"🧹","Internet":"📶","Muebles":"🛋️","Otro":"📦"};
   const maxC=catList[0]?catList[0][1]:1;
   $("catBreakdown").innerHTML=catList.length?catList.map(([cat,amt],i)=>`
     <div class="cat-row">
@@ -1306,10 +1306,14 @@ function renderFinanzas() {
       ${c.emoji} ${c.label}
     </div>`).join("");
 
-  renderFinDonut(allExp);
+  // Datos según el mes seleccionado (para que dona y gráficos reflejen el mes)
+  const chartExp = finMonthMode==="month"
+    ? allExp.filter(e=>(e.date||"").startsWith(finViewYear+"-"+String(finViewMonth+1).padStart(2,"0")))
+    : allExp;
+  renderFinDonut(chartExp);
   renderProjection(allExp);
   renderTrend(allExp);
-  renderBudget(allExp);
+  renderBudget(chartExp);
 
   const searchTerm=($("expSearch")?.value||"").trim().toLowerCase();
   let filtered = selectedFinCat ? allExp.filter(e=>e.cat===selectedFinCat) : allExp;
@@ -1654,8 +1658,9 @@ function renderProjection(allExp){
   }
   const mes=today().slice(0,7);
   const gastoMes=allExp.filter(e=>(e.date||"").startsWith(mes)).reduce((a,e)=>a+e.amount,0);
-  // Balance del hogar desde mi perspectiva (+ me deben / − debo)
-  const bal=computeDebtBalances(STATE.debts);
+  // Balance del hogar SOLO del mes en curso (no cuotas futuras)
+  const debtsMes=STATE.debts.filter(d=>(d.date||"").startsWith(mes));
+  const bal=computeDebtBalances(debtsMes);
   const myNet=isFel(currentUser.displayName)?bal.felipeNet:-bal.felipeNet;
   // Estimado de tarjeta de crédito (del último análisis de estado de cuenta)
   let card_=null;
@@ -2359,6 +2364,8 @@ function invStatus(item){
 }
 
 let activeInvFilter="all";
+let invSortMode="critico"; // "critico" (semáforo global) o "categoria"
+function toggleInvSort(){ invSortMode = invSortMode==="critico"?"categoria":"critico"; renderInventario(); }
 function renderInvFilterBar(){
   const bar=$("invFilterBar"); if(!bar) return;
   // Solo mostrar categorías que tienen productos (+ "Todos")
@@ -2449,9 +2456,17 @@ function renderInventario(){
   // Ordenar cada grupo: los más próximos a quiebre (menos días) primero
   const sortByStock=(a,b)=>{
     const da=daysLeft(a), db=daysLeft(b);
-    const va=da===null?9999:da, vb=db===null?9999:db;
+    const va=(a.qty===0)?-1:(da===null?9999:da), vb=(b.qty===0)?-1:(db===null?9999:db);
     return va-vb;
   };
+  // Modo semáforo: ordenar TODO por criticidad, sin agrupar por categoría
+  if(invSortMode==="critico"){
+    const ordenados=[...list].sort(sortByStock);
+    grid.innerHTML=`<div class="inv-cat-header" style="grid-column:1/-1">🚦 Ordenado por urgencia · lo más crítico primero</div>`+
+      ordenados.map(item=>renderInvCard(item)).join("");
+    updateBadges();
+    return;
+  }
   Object.values(groups).forEach(g=>g.sort(sortByStock));
   grid.innerHTML=catOrder.filter(c=>groups[c]).map(c=>`
     <div class="inv-cat-header" style="grid-column:1/-1">${CAT_EMOJI[c]} ${c} <span class="inv-cat-count">${groups[c].length}</span></div>
@@ -2900,14 +2915,14 @@ function renderDeudas(){
   $("debtHero").innerHTML=`
     <div class="debt-hero-top">
       <div class="dh-user">
-        <div class="dh-avatar" style="background:linear-gradient(135deg,#6B4EFF,#4E9FFF)">F</div>
+        <div class="dh-avatar" style="background:linear-gradient(135deg,#6B4EFF,#4E9FFF)">👨</div>
         <div class="dh-name">Felipe</div>
         <div class="dh-paid" style="color:var(--accent)">${clp(bal.fPaid)}</div>
         <div class="dh-should">pagó este período</div>
       </div>
       <div class="dh-vs">vs</div>
       <div class="dh-user">
-        <div class="dh-avatar" style="background:linear-gradient(135deg,#FF6B9A,#FF6B6B)">M</div>
+        <div class="dh-avatar" style="background:linear-gradient(135deg,#FF6B9A,#FF6B6B)">👩</div>
         <div class="dh-name">Meli</div>
         <div class="dh-paid" style="color:#FF6B9A">${clp(bal.mPaid)}</div>
         <div class="dh-should">pagó este período</div>
@@ -2925,7 +2940,7 @@ function renderDeudas(){
     ?`<div class="debt-balance-pill dbp-ok">🤝 Balance equilibrado — diferencia menor a $500</div>`
     :`<div class="debt-balance-pill dbp-owe">💸 ${bal.felipeNet<0?"Felipe":"Meli"} le debe <strong>${clp(Math.round(bal.owed))}</strong> a ${bal.felipeNet<0?"Meli":"Felipe"}</div>`;
 
-  const CAT_EM={"Supermercado":"🛒","Servicios":"💡","Arriendo":"🏠","Salidas":"🍽️","Salud":"🏥","Transporte":"🚗","Otro":"📦"};
+  const CAT_EM={"Supermercado":"🛒","Servicios":"💡","Arriendo":"🏠","Electrodomestico":"🔌","Salidas":"🍽️","Salud":"🏥","Transporte":"🚗","Mascotas":"🐾","Aseo":"🧹","Internet":"📶","Muebles":"🛋️","Otro":"📦"};
   const dEl=$("debtList");
   // Estado de cuenta mensual estilo banco (solo en vista de mes)
   const stmt=$("debtStatement");
@@ -2960,7 +2975,7 @@ function renderDeudas(){
       :`${shortName(d.owed)} debe ${clp(d.amount)}`;
     const serieInfo=d.groupId?(()=>{const all=STATE.debts.filter(x=>x.groupId===d.groupId);const paid=all.filter(x=>x.paid).length;return{n:all.length,paid};})():null;
     return `<div class="debt-item${d.paid?" paid":""}">
-      <div class="di-avatar" style="background:${isFel(d.payer)?"linear-gradient(135deg,#6B4EFF,#4E9FFF)":"linear-gradient(135deg,#FF6B9A,#FF6B6B)"}">${payerS[0]}</div>
+      <div class="di-avatar" style="background:${isFel(d.payer)?"linear-gradient(135deg,#6B4EFF,#4E9FFF)":"linear-gradient(135deg,#FF6B9A,#FF6B6B)"}">${isFel(d.payer)?"👨":"👩"}</div>
       <div class="di-info">
         <div class="di-name">${d.desc}${cuotaTxt}</div>
         <div class="di-breakdown">Pagó ${payerS} ${clp(d.amount)} → <strong>${owedStr}</strong></div>
@@ -2973,12 +2988,7 @@ function renderDeudas(){
       </div>
       <div class="di-right">
         <div class="di-amount ${d.paid?"paid":""}">${clp(d.amount)}</div>
-        <div class="di-actions">
-          <button class="btn btn-sm ${d.paid?"btn-ghost":"btn-green"}" onclick="toggleDebt('${d.id}')" style="padding:5px 10px;font-size:10px">${d.paid?"↩️":"✅"}</button>
-          <button class="btn btn-red btn-sm" onclick="removeDebt('${d.id}')" style="padding:5px 10px;font-size:10px">🗑️</button>
-          ${serieInfo?`<button class="btn ${serieInfo.paid<serieInfo.n?"btn-green":"btn-ghost"} btn-sm" onclick="toggleDebtSeries('${d.groupId}')" style="padding:5px 8px;font-size:9px" title="Marcar toda la serie">🔁${serieInfo.paid<serieInfo.n?"✅":"↩️"}</button>
-          <button class="btn btn-red btn-sm" onclick="removeDebtSeries('${d.groupId}')" style="padding:5px 8px;font-size:9px" title="Borrar toda la serie">🔁🗑️</button>`:""}
-        </div>
+        <button class="di-menu-btn" onclick="openDebtMenu('${d.id}',event)">⋯</button>
       </div>
     </div>`;
   }).join("");
@@ -3033,6 +3043,80 @@ async function addDebt(){
       }
     });
   }
+}
+
+// Menú de opciones de una deuda (⋯)
+let debtMenuId=null;
+function openDebtMenu(id, ev){
+  if(ev) ev.stopPropagation();
+  debtMenuId=id;
+  const d=STATE.debts.find(x=>x.id===id); if(!d) return;
+  const serieInfo=d.groupId?(()=>{const all=STATE.debts.filter(x=>x.groupId===d.groupId);const paid=all.filter(x=>x.paid).length;return{n:all.length,paid};})():null;
+  const cont=$("debtMenuOptions");
+  cont.innerHTML=`
+    <div class="dmenu-title">${d.desc}</div>
+    <button class="dmenu-opt" onclick="editDebt('${id}')">✏️ Editar (categoría, monto, etc.)</button>
+    <button class="dmenu-opt" onclick="toggleDebt('${id}');closeDebtMenu()">${d.paid?"↩️ Marcar como pendiente":"✅ Marcar como pagada"}</button>
+    <button class="dmenu-opt danger" onclick="removeDebt('${id}');closeDebtMenu()">🗑️ Eliminar esta cuota</button>
+    ${serieInfo?`
+      <div class="dmenu-sep">Serie completa (${serieInfo.n} cuotas)</div>
+      <button class="dmenu-opt" onclick="toggleDebtSeries('${d.groupId}');closeDebtMenu()">${serieInfo.paid<serieInfo.n?"✅ Marcar toda la serie pagada":"↩️ Marcar toda la serie pendiente"}</button>
+      <button class="dmenu-opt danger" onclick="removeDebtSeries('${d.groupId}');closeDebtMenu()">🔁🗑️ Borrar toda la serie</button>`:""}
+  `;
+  $("debtMenuSheet").classList.add("open");
+}
+function closeDebtMenu(){ $("debtMenuSheet").classList.remove("open"); debtMenuId=null; }
+
+// Editar una deuda existente
+let editingDebtId=null;
+function editDebt(id){
+  closeDebtMenu();
+  const d=STATE.debts.find(x=>x.id===id); if(!d) return;
+  editingDebtId=id;
+  $("edDesc").value=d.desc.replace(/\s*\(\d+\/\d+\)/,"");
+  $("edAmount").value=d.amount.toLocaleString("es-CL");
+  $("edPayer").value=isFel(d.payer)?"Felipe":"Melisa";
+  $("edOwed").value=d.owed;
+  $("edCat").value=d.cat;
+  $("edDate").value=d.date||today();
+  // ¿Aplicar a toda la serie?
+  const serieWrap=$("edSerieWrap");
+  if(serieWrap) serieWrap.style.display=d.groupId?"block":"none";
+  if($("edApplySerie")) $("edApplySerie").checked=false;
+  $("sheet-editDebt").classList.add("open");
+}
+
+async function saveEditDebt(){
+  const d=STATE.debts.find(x=>x.id===editingDebtId); if(!d) return;
+  const desc=$("edDesc").value.trim();
+  const amount=parseCLP($("edAmount").value);
+  const payer=$("edPayer").value;
+  const owed=$("edOwed").value;
+  const cat=$("edCat").value;
+  const date=$("edDate").value||today();
+  if(!desc||!amount){ toast("Completa descripción y monto","error"); return; }
+  const aplicarSerie=d.groupId && $("edApplySerie") && $("edApplySerie").checked;
+  const cambios={desc: d.cuota&&d.cuotasTotal?`${desc} (${d.cuota}/${d.cuotasTotal})`:desc, amount, payer, owed, cat};
+
+  if(aplicarSerie){
+    // Aplicar categoría/monto/quién a toda la serie (mantener fechas y numeración de cada cuota)
+    const serie=STATE.debts.filter(x=>x.groupId===d.groupId);
+    serie.forEach(x=>{
+      x.amount=amount; x.payer=payer; x.owed=owed; x.cat=cat;
+      const base=desc.replace(/\s*\(\d+\/\d+\)/,"");
+      x.desc = x.cuota&&x.cuotasTotal?`${base} (${x.cuota}/${x.cuotasTotal})`:base;
+      if(db&&syncOn) fsSet(`households/${HOUSEHOLD_ID}/debts/${x.id}`,{amount,payer,owed,cat,desc:x.desc});
+    });
+    toast(`✏️ Serie completa actualizada (${serie.length} cuotas)`);
+  } else {
+    Object.assign(d, cambios, {date});
+    if(db&&syncOn) fsSet(`households/${HOUSEHOLD_ID}/debts/${editingDebtId}`,{...cambios,date});
+    toast("✏️ Deuda actualizada");
+  }
+  LS.set("debts",STATE.debts);
+  $("sheet-editDebt").classList.remove("open");
+  editingDebtId=null;
+  renderDeudas(); renderDashboard();
 }
 
 async function toggleDebt(id){
@@ -3468,7 +3552,8 @@ Object.assign(window, {
   shiftDebtMonth, stopCamera, toggleDebt, toggleDebtSeries, toggleExcludeHip, yearsToMonths,
   addAhorro, deleteAhorro, renderAhorro, toggleAhInteres, filterOfCat, renderOfertas, cancelLoading,
   toggleSerie, addProyeccionMes, addAllProyeccion, marcarTarjetaPagada,
-  setFinMonthMode, shiftFinMonth
+  setFinMonthMode, shiftFinMonth,
+  openDebtMenu, closeDebtMenu, editDebt, saveEditDebt, toggleInvSort
 });
 
 </script>
@@ -3997,6 +4082,15 @@ img{display:block;max-width:100%}
 .di-amount{font-size:15px;font-weight:800;color:var(--red)}
 .di-amount.paid{color:var(--green)}
 .di-actions{display:flex;gap:5px;margin-top:6px;justify-content:flex-end}
+.di-menu-btn{background:var(--bg2);border:1px solid var(--border2);border-radius:8px;width:34px;height:28px;font-size:18px;font-weight:800;color:var(--text2);cursor:pointer;margin-top:6px;-webkit-tap-highlight-color:transparent;line-height:1}
+.di-menu-btn:active{background:var(--accentbg)}
+.dmenu-title{font-size:14px;font-weight:800;padding:4px 4px 14px;border-bottom:1px solid var(--border);margin-bottom:10px}
+.dmenu-opt{display:block;width:100%;text-align:left;background:var(--bg2);border:1px solid var(--border2);border-radius:12px;padding:13px 15px;font-size:14px;font-weight:600;color:var(--text);cursor:pointer;margin-bottom:8px;-webkit-tap-highlight-color:transparent;font-family:"Inter",sans-serif}
+.dmenu-opt:active{background:var(--accentbg)}
+.dmenu-opt.danger{color:var(--red)}
+.dmenu-sep{font-size:11px;font-weight:800;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;margin:14px 0 8px;padding-left:4px}
+.check-label{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;cursor:pointer}
+.check-label input{width:18px;height:18px}
 
 /* ── BOLETA ── */
 .upload-zone{border:2px dashed var(--border2);border-radius:var(--r-l);padding:38px 20px;text-align:center;cursor:pointer;transition:all .2s;background:var(--bg2);margin-bottom:14px}
@@ -4078,12 +4172,12 @@ img{display:block;max-width:100%}
   <div class="auth-question">¿Quién eres?</div>
   <div class="user-cards">
     <div class="user-card" id="ucard-felipe" onclick="selectUser('felipe')">
-      <div class="user-card-avatar" style="background:linear-gradient(135deg,#6B4EFF,#4E9FFF)">F</div>
+      <div class="user-card-avatar" style="background:linear-gradient(135deg,#6B4EFF,#4E9FFF)">👨</div>
       <div class="user-card-name">Felipe</div>
       <div class="user-card-role">👑 Admin</div>
     </div>
     <div class="user-card" id="ucard-melisa" onclick="selectUser('melisa')">
-      <div class="user-card-avatar" style="background:linear-gradient(135deg,#FF6B9A,#FF6B6B)">M</div>
+      <div class="user-card-avatar" style="background:linear-gradient(135deg,#FF6B9A,#FF6B6B)">👩</div>
       <div class="user-card-name">Melisa</div>
       <div class="user-card-role">Usuario</div>
     </div>
@@ -4248,6 +4342,7 @@ img{display:block;max-width:100%}
       <div class="sec-header">
         <div><div class="sec-title">Inventario</div><div class="sec-subtitle">Del hogar · compartido</div></div>
         <div style="display:flex;gap:8px;align-items:center">
+          <div class="sec-action" onclick="toggleInvSort()">🚦 Orden</div>
           <div class="sec-action" onclick="navTo('boleta')">📷 Escanear</div>
           <div class="sec-action" onclick="openSheet('addInv')">+ Agregar</div>
         </div>
@@ -4399,7 +4494,7 @@ img{display:block;max-width:100%}
         </div>
 
         <button class="btn btn-red btn-full" style="margin-top:16px" onclick="doLogout()">↩️ Cerrar sesión</button>
-        <div style="text-align:center;font-size:10px;color:var(--text3);margin-top:14px">ListaJuntos v22</div>
+        <div style="text-align:center;font-size:10px;color:var(--text3);margin-top:14px">ListaJuntos v23</div>
       </div>
     </div>
 
@@ -4570,6 +4665,59 @@ img{display:block;max-width:100%}
 </div>
 
 <!-- Add Debt -->
+<!-- Menú de opciones de deuda (⋯) -->
+<div class="overlay" id="debtMenuSheet" onclick="if(event.target===this)closeDebtMenu()">
+  <div class="sheet" style="max-height:70vh">
+    <div class="sheet-handle" onclick="closeDebtMenu()"></div>
+    <div id="debtMenuOptions"></div>
+    <button class="btn btn-ghost btn-full" style="margin-top:10px" onclick="closeDebtMenu()">Cerrar</button>
+  </div>
+</div>
+
+<!-- Editar deuda -->
+<div class="overlay" id="sheet-editDebt" onclick="if(event.target===this)this.classList.remove('open')">
+  <div class="sheet">
+    <div class="sheet-handle" onclick="$('sheet-editDebt').classList.remove('open')"></div>
+    <div class="sheet-close-row"><button class="sheet-close-btn" onclick="$('sheet-editDebt').classList.remove('open')">✕ Cerrar</button></div>
+    <div class="sheet-title">Editar gasto del hogar</div>
+    <div style="display:flex;flex-direction:column;gap:12px">
+      <div class="field-group"><label>Descripción</label><input class="field-input" id="edDesc" type="text"></div>
+      <div class="field-row">
+        <div class="field-group"><label>Monto CLP</label><input class="field-input" id="edAmount" type="text" inputmode="numeric" oninput="fmtMoneyInput(this)"></div>
+        <div class="field-group"><label>Fecha</label><input class="field-input" id="edDate" type="date"></div>
+      </div>
+      <div class="field-row">
+        <div class="field-group"><label>¿Quién pagó?</label>
+          <select class="field-input" id="edPayer"><option value="Felipe">Felipe</option><option value="Melisa">Meli</option></select>
+        </div>
+        <div class="field-group"><label>¿Quién debe?</label>
+          <select class="field-input" id="edOwed"><option value="Mitad">Mitad c/u</option><option value="Felipe">Felipe (100%)</option><option value="Melisa">Meli (100%)</option></select>
+        </div>
+      </div>
+      <div class="field-group"><label>Categoría</label>
+        <select class="field-input" id="edCat">
+          <option value="Supermercado">🛒 Supermercado</option>
+          <option value="Servicios">💡 Servicios (luz/agua/gas)</option>
+          <option value="Arriendo">🏠 Arriendo / Dividendo</option>
+          <option value="Electrodomestico">🔌 Electrodoméstico</option>
+          <option value="Salidas">🍽️ Salidas / Delivery</option>
+          <option value="Salud">🏥 Salud / Farmacia</option>
+          <option value="Transporte">🚗 Transporte / Bencina</option>
+          <option value="Mascotas">🐾 Mascotas</option>
+          <option value="Aseo">🧹 Aseo / Limpieza</option>
+          <option value="Internet">📶 Internet / TV</option>
+          <option value="Muebles">🛋️ Muebles / Hogar</option>
+          <option value="Otro">📦 Otro</option>
+        </select>
+      </div>
+      <div class="field-group" id="edSerieWrap" style="display:none">
+        <label class="check-label"><input type="checkbox" id="edApplySerie"> Aplicar cambios a TODA la serie de cuotas</label>
+      </div>
+      <button class="btn btn-accent btn-full" onclick="saveEditDebt()">Guardar cambios</button>
+    </div>
+  </div>
+</div>
+
 <div class="overlay" id="sheet-addDebt" onclick="closeSheetIfBack(event,'addDebt')">
   <div class="sheet">
     <div class="sheet-handle" onclick="closeSheet('addDebt')"></div>
