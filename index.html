@@ -118,13 +118,13 @@ const PWD_SALT = "lj6|";
 const USERS = {
   felipe: {
     uid: "felipe", name: "Felipe", role: "admin",
-    avatar: "👨", color: "linear-gradient(135deg,#6B4EFF,#4E9FFF)",
+    avatar: "🧔", color: "linear-gradient(135deg,#6B4EFF,#4E9FFF)",
     // hash SHA-256 de la contraseña inicial (Felipe123)
     defaultHash: "fcfabceae50b41b7862c42e6a7c9ee8e1b4c63bfa44a496caad8646b187057a9"
   },
   melisa: {
     uid: "melisa", name: "Melisa", role: "user",
-    avatar: "👩", color: "linear-gradient(135deg,#FF6B9A,#FF6B6B)",
+    avatar: "🦷", color: "linear-gradient(135deg,#FF6B9A,#FF6B6B)",
     // hash SHA-256 de la contraseña inicial (Meli123)
     defaultHash: "5a9e0a1d6ab22fb534a970c64bd48ab4444cde6d83ba08602e9766f307ff4ff7"
   }
@@ -435,9 +435,10 @@ function loadLocalData() {
   // Gastos personales por usuario — busca en TODAS las claves posibles para no perder datos
   const u = USERS[currentUser.uid];
   const posiblesClaves = [
+    "exp_" + currentUser.uid,
     "exp_" + (currentUser.displayName || ""),
     "exp_" + u.name,
-    "exp_" + currentUser.uid,
+    "exp_Felipe", "exp_Melisa", "exp_Meli",
     "exp_user"
   ];
   let expRecuperados = [];
@@ -452,8 +453,10 @@ function loadLocalData() {
     }
   }
   STATE.expenses[currentUser.uid] = expRecuperados;
-  // Re-guardar unificado en la clave estándar
-  if (expRecuperados.length) LS.set("exp_" + (currentUser.displayName || "user"), expRecuperados);
+  // Guardar unificado en la clave ESTABLE (uid), y limpiar las viejas para evitar confusión
+  if (expRecuperados.length) {
+    localStorage.setItem("exp_" + currentUser.uid, JSON.stringify(expRecuperados));
+  }
 }
 
 // Helpers de persistencia: escriben en Firestore si hay sync;
@@ -567,7 +570,7 @@ function initSync() {
   const myUid = currentUser.uid;
   unsubListeners.push(db.collection(`users/${myUid}/expenses`).onSnapshot(async snap => {
     const cloud = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-    const local = STATE.expenses[myUid] || LS.get("exp_"+(currentUser.displayName||"user")) || [];
+    const local = STATE.expenses[myUid] || LS.get(expKey()) || [];
 
     // Detectar gastos locales que NO están en la nube (por descripción+monto+fecha)
     const sig = e => `${e.desc}|${e.amount}|${e.date}`;
@@ -588,7 +591,7 @@ function initSync() {
     merged.sort((a, b) => (b.date || "").localeCompare(a.date || ""));
 
     STATE.expenses[myUid] = merged;
-    LS.set("exp_" + (currentUser.displayName || "user"), merged);
+    LS.set(expKey(), merged);
     if (activePage === "finanzas") renderFinanzas();
     if (activePage === "dashboard") renderDashboard();
   }, e => console.warn("sync exp:", e.message)));
@@ -604,12 +607,19 @@ function initSync() {
     if (activePage === "ahorro") renderAhorro();
   }, e => console.warn("sync ahorros:", e.message)));
   unsubListeners.push(db.doc(`users/${myUid}/meta/config`).onSnapshot(snap => {
+    const localIncome = localStorage.getItem("lj6_income_" + myUid);
     if (!snap.exists) { pushUserConfig(); return; }
     const cfg = snap.data();
-    if (cfg.income != null) localStorage.setItem("lj6_income_" + myUid, cfg.income);
+    // Ingreso: la nube solo actualiza si trae un valor válido; si no, se conserva el local y se re-sube
+    if (cfg.income != null && cfg.income > 0) {
+      localStorage.setItem("lj6_income_" + myUid, cfg.income);
+    } else if (localIncome && parseInt(localIncome) > 0) {
+      pushUserConfig(); // la nube está vacía pero yo tengo dato local: subirlo
+    }
     if (cfg.heroImg) { localStorage.setItem("lj6_hero_" + myUid, cfg.heroImg); applyHeroImg(cfg.heroImg); }
     if (cfg.banks) localStorage.setItem("lj6_banks_" + myUid, JSON.stringify(cfg.banks));
     if (activePage === "dashboard") renderDashboard();
+    if (activePage === "finanzas") renderFinanzas();
   }, e => console.warn("sync cfg:", e.message)));
 
   // Ofertas de la semana compartidas (búsquedas de cualquiera las ve la pareja)
@@ -898,7 +908,7 @@ async function pushUserConfig(){
   const uid_=currentUser.uid;
   try{
     const cfg={
-      income: parseInt(localStorage.getItem("lj6_income_"+uid_))||null,
+      income: parseCLP(localStorage.getItem("lj6_income_"+uid_))||null,
       heroImg: LS.get("heroImg_"+uid_)||null,
       banks: (()=>{ try{ return JSON.parse(localStorage.getItem("lj6_banks_"+uid_)||"null"); }catch(e){ return null; } })(),
     };
@@ -1111,30 +1121,49 @@ function renderAhorro(){
     return;
   }
   const total=list.reduce((a,x)=>a+x.monto,0);
-  // Agrupar por tipo
   const porTipo={};
   list.forEach(a=>{ porTipo[a.tipo]=(porTipo[a.tipo]||0)+a.monto; });
-  // Rentabilidad anual estimada (suma de monto*tasa)
   const rentaAnual=list.reduce((a,x)=>a+(x.tasa?x.monto*x.tasa/100:0),0);
+  // Proyección a 1, 5 y 10 años con interés compuesto (por instrumento con tasa)
+  const proyecta=(anios)=>list.reduce((acc,x)=>{
+    const tasa=(x.tasa||0)/100;
+    return acc + (tasa>0 ? x.monto*Math.pow(1+tasa,anios) : x.monto);
+  },0);
+  const p1=proyecta(1), p5=proyecta(5), p10=proyecta(10);
+  const tasaProm= total>0 ? (rentaAnual/total*100) : 0;
   sum.innerHTML=`
     <div class="ahorro-total-card">
-      <div class="at-label">💰 Total ahorrado</div>
+      <div class="at-label">💰 Total ahorrado e invertido</div>
       <div class="at-value">${clp(total)}</div>
-      ${rentaAnual>0?`<div class="at-renta">📈 Rentabilidad estimada: <strong>+${clp(Math.round(rentaAnual))}/año</strong></div>`:""}
+      ${rentaAnual>0?`<div class="at-renta">📈 Rentabilidad estimada: <strong>+${clp(Math.round(rentaAnual))}/año</strong> · tasa promedio ${tasaProm.toFixed(1)}%</div>`:""}
       <div class="at-tipos">
         ${Object.entries(porTipo).sort((a,b)=>b[1]-a[1]).map(([t,m])=>`
           <div class="at-tipo"><span>${(AHORRO_TIPOS[t]||{e:"🎯"}).e} ${(AHORRO_TIPOS[t]||{l:t}).l}</span><span>${clp(m)}</span></div>`).join("")}
       </div>
-    </div>`;
-  cont.innerHTML=list.map(a=>{
+    </div>
+    ${rentaAnual>0?`
+    <div class="ahorro-proj-card">
+      <div class="apc-title">🔮 Proyección con interés compuesto</div>
+      <div class="apc-row"><span>En 1 año</span><span>${clp(Math.round(p1))} <em>+${clp(Math.round(p1-total))}</em></span></div>
+      <div class="apc-row"><span>En 5 años</span><span>${clp(Math.round(p5))} <em>+${clp(Math.round(p5-total))}</em></span></div>
+      <div class="apc-row"><span>En 10 años</span><span>${clp(Math.round(p10))} <em>+${clp(Math.round(p10-total))}</em></span></div>
+      <div class="apc-note">Estimación asumiendo que mantienes el capital y las tasas actuales. La rentabilidad real varía.</div>
+    </div>`:""}`;
+  cont.innerHTML=`<div class="ahorro-list-head">
+      <span>Mis instrumentos</span>
+      <button class="btn-analizar-ia" onclick="analizarAhorros()">🤖 Analizar con IA</button>
+    </div>`+list.map(a=>{
     const t=AHORRO_TIPOS[a.tipo]||{e:"🎯",l:a.tipo};
     const inst=AHORRO_INSTR[a.instrumento]||"";
     const conInteres=a.instrumento&&a.instrumento!=="ninguno";
+    const rentaItem=a.tasa?Math.round(a.monto*a.tasa/100):0;
     return `<div class="ahorro-item">
       <div class="ah-icon">${t.e}</div>
       <div class="ah-info">
         <div class="ah-name">${a.desc}</div>
-        <div class="ah-meta">${t.l}${conInteres?` · ${inst}${a.tasa?` (${a.tasa}%)`:""}`:""} · ${a.fecha}</div>
+        <div class="ah-meta">${t.l}${conInteres?` · ${inst}${a.tasa?` · ${a.tasa}% anual`:""}`:""} · ${a.fecha}</div>
+        ${rentaItem>0?`<div class="ah-renta-item">📈 +${clp(rentaItem)}/año estimado</div>`:""}
+        ${a.iaNota?`<div class="ah-ia-nota">🤖 ${a.iaNota}</div>`:""}
       </div>
       <div class="ah-right">
         <div class="ah-amount">${clp(a.monto)}</div>
@@ -1142,6 +1171,66 @@ function renderAhorro(){
       </div>
     </div>`;
   }).join("");
+}
+
+// Análisis de inversiones con IA: consulta info actualizada de instrumentos en Chile
+async function analizarAhorros(){
+  const uid_=currentUser.uid;
+  const list=STATE.ahorros[uid_]||[];
+  if(!list.length){ toast("Primero agrega un ahorro","error"); return; }
+  if(!anthKey()){ toast("Configura la IA: toca tu avatar → 🤖 Configurar IA","error"); return; }
+  setLoading(true,"Analizando tus inversiones con datos actuales...");
+  try{
+    const detalle=list.map(a=>`${a.desc}: ${clp(a.monto)} en ${AHORRO_INSTR[a.instrumento]||"cuenta"}${a.tasa?` a ${a.tasa}%`:""} (meta: ${(AHORRO_TIPOS[a.tipo]||{l:a.tipo}).l})`).join("; ");
+    const prompt=`Eres un asesor financiero experto en productos de inversión y ahorro en Chile. Analiza esta cartera de un cliente y busca información ACTUAL en la web sobre estos instrumentos.
+
+Cartera: ${detalle}
+
+Busca en fuentes oficiales chilenas (CMF, bancos, AGF, previred) las tasas y rentabilidades vigentes de este tipo de instrumentos (APV, fondos mutuos, depósitos a plazo, etc.) este mes. Considera el contexto de tasas del Banco Central de Chile.
+
+Responde SOLO con este JSON:
+{"resumen":"evaluación general de la cartera en 2 frases","sugerencias":[{"para":"nombre del ahorro o instrumento","nota":"sugerencia concreta y breve (max 12 palabras)","tasaReferencia":"ej: depósitos a plazo hoy rinden ~X% anual"}],"alertas":["riesgo o punto de atención"],"oportunidades":["oportunidad concreta con tasas actuales"]}
+
+Sé concreto con números reales que encuentres. Máximo 4 sugerencias.`;
+    const res=await fetchWithTimeout("https://api.anthropic.com/v1/messages",{
+      method:"POST",
+      headers:{"Content-Type":"application/json","x-api-key":anthKey(),"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
+      body:JSON.stringify({model:AI_MODEL,max_tokens:3000,
+        messages:[{role:"user",content:prompt}],
+        tools:[{type:"web_search_20250305",name:"web_search",max_uses:5}]})
+    }, 90000);
+    const data=await res.json();
+    if(data.error) throw new Error(data.error.message||JSON.stringify(data.error));
+    const text=(data.content||[]).filter(b=>b.type==="text").map(b=>b.text).join("\n");
+    if(!text.trim()) throw new Error("La IA no devolvió análisis. Reintenta.");
+    const parsed=parseAIJson(text);
+    // Aplicar notas a los ahorros que coincidan
+    if(parsed.sugerencias){
+      parsed.sugerencias.forEach(s=>{
+        const match=list.find(a=>a.desc.toLowerCase().includes((s.para||"").toLowerCase().slice(0,8)) || (s.para||"").toLowerCase().includes(a.desc.toLowerCase().slice(0,8)));
+        if(match) match.iaNota=s.nota;
+      });
+      LS.set("ahorros_"+uid_, list);
+    }
+    setLoading(false);
+    showAhorroAnalisis(parsed);
+    renderAhorro();
+  }catch(e){
+    setLoading(false);
+    toast("Análisis: "+aiErrMsg(e),"error");
+  }
+}
+
+function showAhorroAnalisis(a){
+  const cont=$("ahorroAnalisisContent");
+  if(!cont) return;
+  cont.innerHTML=`
+    ${a.resumen?`<div class="aa-resumen">${a.resumen}</div>`:""}
+    ${a.oportunidades&&a.oportunidades.length?`<div class="aa-block green"><div class="aa-block-t">💡 Oportunidades</div>${a.oportunidades.map(o=>`<div class="aa-item">${o}</div>`).join("")}</div>`:""}
+    ${a.sugerencias&&a.sugerencias.length?`<div class="aa-block"><div class="aa-block-t">🎯 Sugerencias</div>${a.sugerencias.map(s=>`<div class="aa-item"><strong>${s.para}:</strong> ${s.nota}${s.tasaReferencia?`<div class="aa-ref">${s.tasaReferencia}</div>`:""}</div>`).join("")}</div>`:""}
+    ${a.alertas&&a.alertas.length?`<div class="aa-block red"><div class="aa-block-t">⚠️ Puntos de atención</div>${a.alertas.map(al=>`<div class="aa-item">${al}</div>`).join("")}</div>`:""}
+    <div class="aa-disclaimer">🤖 Análisis generado con IA y búsqueda web. Es orientativo, no asesoría financiera formal. Verifica con tu banco o asesor antes de decidir.</div>`;
+  $("sheet-ahorroAnalisis").classList.add("open");
 }
 
 function renderDashboard() {
@@ -1282,6 +1371,7 @@ const PRIVATE_CATS = [
 ];
 
 let selectedFinCat = null;
+let trendIncludeHip = false;
 let finMonthMode = "all"; // "all" o "month"
 let finViewYear = new Date().getFullYear();
 let finViewMonth = new Date().getMonth();
@@ -1290,7 +1380,7 @@ let sheetExpCat    = null;
 function renderFinanzas() {
   if(!currentUser) return;
   const uid_ = currentUser.uid;
-  const allExp = STATE.expenses[uid_] || LS.get("exp_"+(currentUser.displayName||"user")) || [];
+  const allExp = STATE.expenses[uid_] || LS.get(expKey()) || [];
   // Mostrar botón de borrar análisis si hay gastos importados por IA o estimado de tarjeta
   const clearBtn=$("estadoClearBtn");
   if(clearBtn){
@@ -1441,6 +1531,8 @@ function shiftFinMonth(delta){
 
 // ── Ingreso mensual + proyección de fin de mes ──
 function getIncome(){ return parseCLP(localStorage.getItem("lj6_income_"+currentUser.uid)); }
+// Clave estable para gastos personales (usa uid constante, no displayName que puede variar)
+function expKey(){ return "exp_"+currentUser.uid; }
 
 function setIncome(){
   const cur=getIncome();
@@ -1492,7 +1584,9 @@ function renderTrend(allExp){
   const expSinHip=allExp.filter(e=>!esHipot(e));
   const expHip=allExp.filter(e=>esHipot(e));
 
-  const data=monthlyTotals(expSinHip,3,3); // 3 atrás + actual + 3 futuros
+  // Modo: incluir o no el hipotecario en las barras
+  const baseExp = trendIncludeHip ? allExp : expSinHip;
+  const data=monthlyTotals(baseExp,3,3); // 3 atrás + actual + 3 futuros
   const hasData=data.some(d=>d.total>0);
   if(!hasData){ card.innerHTML=""; return; }
   const maxV=Math.max(...data.map(d=>d.total),1);
@@ -1514,25 +1608,43 @@ function renderTrend(allExp){
   }).join("");
   const pastData=data.filter(d=>!d.future);
   const avg=Math.round(pastData.reduce((a,d)=>a+d.total,0)/(pastData.filter(d=>d.total>0).length||1));
-  // Hipotecario aparte
+  // Hipotecario del mes
   const now=new Date();
-  const hipMes=expHip.filter(e=>(e.date||"").startsWith(now.getFullYear()+"-"+String(now.getMonth()+1).padStart(2,"0"))).reduce((a,e)=>a+e.amount,0);
-  const hipCard = hipMes>0 ? `
+  const mesKey=now.getFullYear()+"-"+String(now.getMonth()+1).padStart(2,"0");
+  const hipMes=expHip.filter(e=>(e.date||"").startsWith(mesKey)).reduce((a,e)=>a+e.amount,0);
+  const hipCard = (hipMes>0 && !trendIncludeHip) ? `
     <div class="hip-aside">
-      <div class="hip-aside-label">🏠 Hipotecario/mes<br><span>(seguimiento aparte)</span></div>
+      <div class="hip-aside-label">🏠 Hipotecario/mes<br><span>(no incluido)</span></div>
       <div class="hip-aside-val">${clp(hipMes)}</div>
     </div>` : "";
+  // Chequeo de ingreso: ¿alcanza para el total del mes actual (incl. hipotecario)?
+  const income=getIncome();
+  const totalMesActual=data[curIdx]?.total||0;
+  const totalConHip=trendIncludeHip?totalMesActual:(totalMesActual+hipMes);
+  let alcanzaTxt="";
+  if(income){
+    const resto=income-totalConHip;
+    alcanzaTxt=`<div class="trend-income-check ${resto>=0?"ok":"bad"}">
+      ${resto>=0?"✅":"⚠️"} Con ingreso de ${clp(income)}, ${resto>=0?`te quedarían <strong>${clp(resto)}</strong> este mes`:`te faltarían <strong>${clp(Math.abs(resto))}</strong> para cubrir todo`} ${!trendIncludeHip&&hipMes>0?"(incluyendo dividendo)":""}
+    </div>`;
+  }
   card.innerHTML=`
     <div class="trend-head">
       <div class="trend-title">📉 Tendencia de gastos</div>
       ${trendTxt?`<div class="trend-diff" style="color:${trendCol}">${trendTxt}</div>`:""}
     </div>
+    <div class="trend-toggle-row">
+      <button class="trend-toggle ${!trendIncludeHip?"on":""}" onclick="setTrendHip(false)">Sin hipotecario</button>
+      <button class="trend-toggle ${trendIncludeHip?"on":""}" onclick="setTrendHip(true)">🏠 Con dividendo</button>
+    </div>
     <div class="trend-body">
       <div class="tbar-chart" style="flex:1">${bars}</div>
       ${hipCard}
     </div>
-    <div class="trend-note">Promedio mensual (sin hipotecario): <strong>${clp(avg)}</strong> · las barras claras a la derecha son meses futuros con cuotas ya comprometidas</div>`;
+    ${alcanzaTxt}
+    <div class="trend-note">Promedio mensual ${trendIncludeHip?"(con hipotecario)":"(sin hipotecario)"}: <strong>${clp(avg)}</strong> · las barras claras son meses futuros con cuotas comprometidas</div>`;
 }
+function setTrendHip(v){ trendIncludeHip=v; renderFinanzas(); }
 
 // ── Presupuesto por categoría ──
 function getBudgets(){ try{ return JSON.parse(localStorage.getItem("lj6_budget_"+currentUser.uid)||"{}"); }catch(e){ return {}; } }
@@ -1656,9 +1768,10 @@ function renderProjection(allExp){
     </div>`;
     return;
   }
-  const mes=today().slice(0,7);
+  const mes = finMonthMode==="month" ? (finViewYear+"-"+String(finViewMonth+1).padStart(2,"0")) : today().slice(0,7);
+  const esMesActual = mes===today().slice(0,7);
   const gastoMes=allExp.filter(e=>(e.date||"").startsWith(mes)).reduce((a,e)=>a+e.amount,0);
-  // Balance del hogar SOLO del mes en curso (no cuotas futuras)
+  // Balance del hogar SOLO del mes visto (no cuotas futuras)
   const debtsMes=STATE.debts.filter(d=>(d.date||"").startsWith(mes));
   const bal=computeDebtBalances(debtsMes);
   const myNet=isFel(currentUser.displayName)?bal.felipeNet:-bal.felipeNet;
@@ -1672,8 +1785,8 @@ function renderProjection(allExp){
   const pct=Math.min(100,Math.round((gastoMes+tarjeta)/income*100));
   card.innerHTML=`
     <div class="proj-head">
-      <div>📈 Proyección del mes <span class="proj-edit" onclick="setIncome()">✏️ editar ingreso</span></div>
-      <div class="proj-pay">💰 Sueldo en ${dPay} día${dPay===1?"":"s"} (día 30)</div>
+      <div>📈 Proyección ${esMesActual?"del mes":"de "+MESES[finViewMonth]} <span class="proj-edit" onclick="setIncome()">✏️ editar ingreso</span></div>
+      ${esMesActual?`<div class="proj-pay">💰 Sueldo en ${dPay} día${dPay===1?"":"s"} (día 30)</div>`:`<div class="proj-pay">📅 ${MESES[finViewMonth]} ${finViewYear}</div>`}
     </div>
     <div class="proj-grid">
       <div class="proj-cell"><div class="proj-l">Ingreso mensual</div><div class="proj-v">${clp(income)}</div></div>
@@ -1737,22 +1850,25 @@ function renderFinDonut(allExp){
       const lenH=frac*Ch;
       hipBox.style.display="block";
       hipBox.innerHTML=`
-        <div class="donut-title">🏠 Hipotecario</div>
-        <div class="hipdon-wrap">
-          <svg viewBox="0 0 90 90" class="hipdon-svg">
-            <circle cx="45" cy="45" r="34" fill="none" stroke="var(--bg3)" stroke-width="12"/>
-            <circle cx="45" cy="45" r="34" fill="none" stroke="#6B4EFF" stroke-width="12"
-              stroke-dasharray="${lenH} ${Ch-lenH}" stroke-dashoffset="0" transform="rotate(-90 45 45)" stroke-linecap="round"/>
-          </svg>
-          <div class="hipdon-center">
-            <div class="hipdon-pct">${Math.round(frac*100)}%</div>
-            <div class="hipdon-sub">pagado</div>
+        <div class="donut-title">🏠 Crédito Hipotecario</div>
+        <div class="donut-row">
+          <div class="donut-wrap">
+            <svg width="120" height="120" viewBox="0 0 120 120" style="transform:rotate(-90deg)">
+              <circle cx="60" cy="60" r="48" fill="none" stroke="var(--bg3)" stroke-width="16"/>
+              <circle cx="60" cy="60" r="48" fill="none" stroke="#6B4EFF" stroke-width="16"
+                stroke-dasharray="${frac*2*Math.PI*48} ${2*Math.PI*48}" stroke-dashoffset="0" stroke-linecap="round"
+                style="transition:stroke-dasharray .75s cubic-bezier(.4,0,.2,1)"/>
+            </svg>
+            <div class="donut-center">
+              <div class="donut-center-val" style="color:#6B4EFF">${Math.round(frac*100)}%</div>
+              <div class="donut-center-lbl">Pagado</div>
+            </div>
           </div>
-        </div>
-        <div class="hipdon-info">
-          <div class="hipdon-row"><span>Cuota mensual</span><span>${clp(conCuota?conCuota.amount:Math.round(totalHip/Math.max(expHip.length,1)))}</span></div>
-          <div class="hipdon-row"><span>Cuotas</span><span>${pagadas}/${totalCuotas}</span></div>
-          <div class="hipdon-row"><span>Restante</span><span>${clp(totalHip - expHip.filter(e=>(e.date||"")<now).reduce((a,e)=>a+e.amount,0))}</span></div>
+          <div class="donut-legend">
+            <div class="dleg"><div class="dleg-dot" style="background:#6B4EFF"></div><div class="dleg-name">Cuota mensual</div><div class="dleg-amt">${clp(conCuota?conCuota.amount:Math.round(totalHip/Math.max(expHip.length,1)))}</div></div>
+            <div class="dleg"><div class="dleg-dot" style="background:#4E9FFF"></div><div class="dleg-name">Cuotas pagadas</div><div class="dleg-amt">${pagadas}/${totalCuotas}</div></div>
+            <div class="dleg"><div class="dleg-dot" style="background:#94A3B8"></div><div class="dleg-name">Saldo restante</div><div class="dleg-amt">${clp(totalHip - expHip.filter(e=>(e.date||"")<now).reduce((a,e)=>a+e.amount,0))}</div></div>
+          </div>
         </div>`;
     } else { hipBox.style.display="none"; hipBox.innerHTML=""; }
   }
@@ -1760,9 +1876,15 @@ function renderFinDonut(allExp){
 
 // ── Chips de categoría en el sheet de agregar gasto ──
 function renderExpSheetCats(){
-  const el=$("expCatChips"); if(!el) return;
-  el.innerHTML=PRIVATE_CATS.map(c=>`
-    <div class="cat-chip ${sheetExpCat===c.id?"sel":""}" id="xcat-${c.id}" onclick="selectSheetCat('${c.id}')">${c.emoji} ${c.label}</div>`).join("");
+  const el=$("expCatSelect"); if(!el) return;
+  el.innerHTML=PRIVATE_CATS.map(c=>`<option value="${c.id}" ${sheetExpCat===c.id?"selected":""}>${c.emoji} ${c.label}</option>`).join("");
+  el.onchange=()=>{ sheetExpCat=el.value; };
+  if(!sheetExpCat) sheetExpCat=PRIVATE_CATS[0]?.id;
+}
+function onExpRepeatSelect(val){
+  const custom=$("expRepeatMonths");
+  if(val==="custom"){ custom.style.display="block"; custom.focus(); }
+  else { custom.style.display="none"; custom.value = val==="1"?"":val; }
 }
 function selectSheetCat(id){
   sheetExpCat=id;
@@ -1782,8 +1904,10 @@ function openAddExpense(){
     const dia=String(Math.min(new Date().getDate(),28)).padStart(2,"0");
     $("expDate").value=`${finViewYear}-${String(finViewMonth+1).padStart(2,"0")}-${dia}`;
   } else { $("expDate").value=today(); }
-  $("expRepeatMonths").value=""; $("expRepeatWrap").style.display="block";
-  sheetExpCat=null; renderExpSheetCats();
+  $("expRepeatMonths").value=""; $("expRepeatMonths").style.display="none";
+  if($("expRepeatSelect")) $("expRepeatSelect").value="1";
+  $("expRepeatWrap").style.display="block";
+  sheetExpCat=PRIVATE_CATS[0]?.id; renderExpSheetCats();
   openSheet("addExpense");
 }
 
@@ -1814,7 +1938,7 @@ async function addExpense() {
     if(e){
       e.desc=desc; e.amount=amount; e.cat=sheetExpCat||"otros"; e.date=date;
       await fsSet(`users/${uid_}/expenses/${editingExpId}`,{desc,amount,cat:e.cat,date});
-      LS.set("exp_"+(currentUser.displayName||"user"), STATE.expenses[uid_]);
+      LS.set(expKey(), STATE.expenses[uid_]);
     }
     editingExpId=null;
     closeSheet("addExpense");
@@ -1824,7 +1948,8 @@ async function addExpense() {
   }
 
   // Modo creación (con recurrencia opcional)
-  const repInput = parseInt($("expRepeatMonths").value) || 1;
+  const sel=$("expRepeatSelect")?.value||"1";
+  const repInput = sel==="custom" ? (parseInt($("expRepeatMonths").value)||1) : (parseInt(sel)||1);
   let repeat = Math.max(1, Math.min(600, repInput));
   if(repeat>1 && !confirm(`¿Crear ${repeat} gastos mensuales de ${clp(amount)} c/u?\nTotal: ${clp(amount*repeat)}`)) return;
   const groupId=repeat>1?uid():null;
@@ -1841,7 +1966,7 @@ async function addExpense() {
   // Mostrar al instante con ids locales
   const localItems = nuevas.map(e=>({ id: uid(), ...e }));
   localItems.forEach(e=>STATE.expenses[uid_].unshift(e));
-  LS.set("exp_"+(currentUser.displayName||"user"), STATE.expenses[uid_]);
+  LS.set(expKey(), STATE.expenses[uid_]);
   closeSheet("addExpense");
   $("expDesc").value=""; $("expAmount").value=""; sheetExpCat=null;
   renderFinanzas(); renderDashboard();
@@ -1851,7 +1976,7 @@ async function addExpense() {
     fsAddBatch(`users/${uid_}/expenses`, nuevas).then(creadas=>{
       if(creadas && creadas.length===localItems.length){
         localItems.forEach((li,i)=>{ const real=STATE.expenses[uid_].find(x=>x.id===li.id); if(real) real.id=creadas[i].id; });
-        LS.set("exp_"+(currentUser.displayName||"user"), STATE.expenses[uid_]);
+        LS.set(expKey(), STATE.expenses[uid_]);
       }
     });
   }
@@ -1862,7 +1987,7 @@ async function deleteExpense(eid) {
   const uid_=currentUser.uid;
   await fsDel(`users/${uid_}/expenses/${eid}`);
   STATE.expenses[uid_]=(STATE.expenses[uid_]||[]).filter(e=>e.id!==eid);
-  LS.set("exp_"+(currentUser.displayName||"user"), STATE.expenses[uid_]);
+  LS.set(expKey(), STATE.expenses[uid_]);
   renderFinanzas(); renderDashboard();
   toast("🗑️ Gasto eliminado");
 }
@@ -1875,7 +2000,7 @@ async function deleteExpenseSeries(groupId){
   if(!confirm(`¿Eliminar la serie completa?\n${serie.length} gastos · ${clp(total)} en total\n\nNo se puede deshacer.`)) return;
   const ids=serie.map(e=>e.id);
   STATE.expenses[uid_]=STATE.expenses[uid_].filter(e=>e.groupId!==groupId);
-  LS.set("exp_"+(currentUser.displayName||"user"), STATE.expenses[uid_]);
+  LS.set(expKey(), STATE.expenses[uid_]);
   renderFinanzas(); renderDashboard();
   toast(`🗑️ Serie eliminada (${serie.length} gastos)`);
   fsDelBatch(`users/${uid_}/expenses`, ids);
@@ -1959,7 +2084,7 @@ async function clearAIExpenses(){
   setLoading(true,"Borrando análisis...");
   for(const e of aiExp){ await fsDel(`users/${uid_}/expenses/${e.id}`); }
   STATE.expenses[uid_]=(STATE.expenses[uid_]||[]).filter(e=>!e.aiGenerated);
-  LS.set("exp_"+(currentUser.displayName||"user"),STATE.expenses[uid_]);
+  LS.set(expKey(),STATE.expenses[uid_]);
   localStorage.removeItem("lj6_card_"+uid_);
   // Limpiar la vista de resultados
   const r=$("estadoResults"); if(r){ r.style.display="none"; r.innerHTML=""; }
@@ -2026,7 +2151,7 @@ ${estadoCuentaText.trim()?"ESTADO DE CUENTA (texto):\n"+estadoCuentaText.slice(0
         const newId=await fsAdd(`users/${uid_}/expenses`,newExp);
         STATE.expenses[uid_].unshift({id:newId,...newExp});
       }
-      LS.set("exp_"+(currentUser.displayName||"user"),STATE.expenses[uid_]);
+      LS.set(expKey(),STATE.expenses[uid_]);
     }
     // Guardar estimado de tarjeta para la proyección del mes
     if(parsed.tarjeta && (parsed.tarjeta.estimadoAFinDeMes||parsed.tarjeta.totalFacturado)){
@@ -2128,13 +2253,13 @@ async function addProyeccionMes(idx, btn){
   // Mostrar al instante, subir en segundo plano
   const localId=uid();
   STATE.expenses[uid_].unshift({id:localId,...newExp});
-  LS.set("exp_"+(currentUser.displayName||"user"),STATE.expenses[uid_]);
+  LS.set(expKey(),STATE.expenses[uid_]);
   if(btn){ btn.textContent="✓ Agregado"; btn.classList.remove("btn-accent"); btn.classList.add("btn-green"); btn.disabled=true; btn.style.opacity=".7"; }
   renderDashboard();
   toast(`✅ ${p.mes}: ${clp(p.monto)} agregado a tu historial`);
   if(db && syncOn){
     fsAdd(`users/${uid_}/expenses`,newExp).then(realId=>{
-      const it=STATE.expenses[uid_].find(x=>x.id===localId); if(it&&realId){ it.id=realId; LS.set("exp_"+(currentUser.displayName||"user"),STATE.expenses[uid_]); }
+      const it=STATE.expenses[uid_].find(x=>x.id===localId); if(it&&realId){ it.id=realId; LS.set(expKey(),STATE.expenses[uid_]); }
     });
   }
 }
@@ -2915,14 +3040,14 @@ function renderDeudas(){
   $("debtHero").innerHTML=`
     <div class="debt-hero-top">
       <div class="dh-user">
-        <div class="dh-avatar" style="background:linear-gradient(135deg,#6B4EFF,#4E9FFF)">👨</div>
+        <div class="dh-avatar" style="background:linear-gradient(135deg,#6B4EFF,#4E9FFF)">🧔</div>
         <div class="dh-name">Felipe</div>
         <div class="dh-paid" style="color:var(--accent)">${clp(bal.fPaid)}</div>
         <div class="dh-should">pagó este período</div>
       </div>
       <div class="dh-vs">vs</div>
       <div class="dh-user">
-        <div class="dh-avatar" style="background:linear-gradient(135deg,#FF6B9A,#FF6B6B)">👩</div>
+        <div class="dh-avatar" style="background:linear-gradient(135deg,#FF6B9A,#FF6B6B)">🦷</div>
         <div class="dh-name">Meli</div>
         <div class="dh-paid" style="color:#FF6B9A">${clp(bal.mPaid)}</div>
         <div class="dh-should">pagó este período</div>
@@ -2975,7 +3100,7 @@ function renderDeudas(){
       :`${shortName(d.owed)} debe ${clp(d.amount)}`;
     const serieInfo=d.groupId?(()=>{const all=STATE.debts.filter(x=>x.groupId===d.groupId);const paid=all.filter(x=>x.paid).length;return{n:all.length,paid};})():null;
     return `<div class="debt-item${d.paid?" paid":""}">
-      <div class="di-avatar" style="background:${isFel(d.payer)?"linear-gradient(135deg,#6B4EFF,#4E9FFF)":"linear-gradient(135deg,#FF6B9A,#FF6B6B)"}">${isFel(d.payer)?"👨":"👩"}</div>
+      <div class="di-avatar" style="background:${isFel(d.payer)?"linear-gradient(135deg,#6B4EFF,#4E9FFF)":"linear-gradient(135deg,#FF6B9A,#FF6B6B)"}">${isFel(d.payer)?"🧔":"🦷"}</div>
       <div class="di-info">
         <div class="di-name">${d.desc}${cuotaTxt}</div>
         <div class="di-breakdown">Pagó ${payerS} ${clp(d.amount)} → <strong>${owedStr}</strong></div>
@@ -3548,12 +3673,13 @@ Object.assign(window, {
   loadHeroImg, loadIndicators, marcarTarjetaPagada, ofertaToShop, onInvNameInput,
   openAddExpense, openCamera, openEditExpense, openSheet, removeBankCard, removeDebt,
   removeDebtSeries, renderFinanzas, renderOfertas, restockItem, runInsights, runMonthSummary, selectFinCat,
-  selectSheetCat, setBudget, setDebtMonths, setDebtPeriod, setExpMonths, setIncome,
+  selectSheetCat, setBudget, setDebtMonths, setDebtPeriod, setExpMonths, setIncome, onExpRepeatSelect,
   shiftDebtMonth, stopCamera, toggleDebt, toggleDebtSeries, toggleExcludeHip, yearsToMonths,
   addAhorro, deleteAhorro, renderAhorro, toggleAhInteres, filterOfCat, renderOfertas, cancelLoading,
   toggleSerie, addProyeccionMes, addAllProyeccion, marcarTarjetaPagada,
   setFinMonthMode, shiftFinMonth,
-  openDebtMenu, closeDebtMenu, editDebt, saveEditDebt, toggleInvSort
+  openDebtMenu, closeDebtMenu, editDebt, saveEditDebt, toggleInvSort, setTrendHip,
+  analizarAhorros, showAhorroAnalisis
 });
 
 </script>
@@ -3819,6 +3945,25 @@ img{display:block;max-width:100%}
 .ah-meta{font-size:11px;color:var(--text3);margin-top:2px}
 .ah-right{text-align:right;display:flex;flex-direction:column;align-items:flex-end;gap:4px}
 .ah-amount{font-size:15px;font-weight:800;color:#10B981;font-family:"Fraunces",serif}
+.ahorro-proj-card{margin:0 18px 14px;padding:16px;background:var(--sur);border:1px solid var(--border);border-radius:var(--r-l);box-shadow:var(--sh)}
+.apc-title{font-size:12px;font-weight:800;color:var(--text2);margin-bottom:10px}
+.apc-row{display:flex;justify-content:space-between;align-items:center;font-size:13px;font-weight:600;padding:7px 0;border-top:1px solid var(--border)}
+.apc-row:first-of-type{border-top:none}
+.apc-row em{font-style:normal;font-size:11px;color:#10B981;font-weight:700;margin-left:6px}
+.apc-note{font-size:10px;color:var(--text3);margin-top:8px;line-height:1.4}
+.ahorro-list-head{display:flex;justify-content:space-between;align-items:center;margin:4px 18px 10px}
+.ahorro-list-head span{font-size:12px;font-weight:800;color:var(--text3);text-transform:uppercase;letter-spacing:.5px}
+.btn-analizar-ia{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;border:none;border-radius:16px;padding:7px 13px;font-size:11.5px;font-weight:700;cursor:pointer;-webkit-tap-highlight-color:transparent;font-family:"Inter",sans-serif}
+.ah-renta-item{font-size:10.5px;color:#10B981;font-weight:600;margin-top:2px}
+.ah-ia-nota{font-size:10.5px;color:var(--accent2);margin-top:3px;background:var(--accentbg);padding:3px 7px;border-radius:8px;display:inline-block}
+.aa-resumen{font-size:13.5px;line-height:1.5;color:var(--text);background:var(--accentbg);padding:13px;border-radius:12px;margin-bottom:12px}
+.aa-block{margin-bottom:12px;padding:12px;border-radius:12px;background:var(--bg2);border:1px solid var(--border)}
+.aa-block.green{background:var(--greenbg);border-color:transparent}
+.aa-block.red{background:var(--redbg);border-color:transparent}
+.aa-block-t{font-size:12px;font-weight:800;margin-bottom:8px}
+.aa-item{font-size:12.5px;line-height:1.45;padding:5px 0;color:var(--text2)}
+.aa-ref{font-size:11px;color:var(--accent2);margin-top:2px;font-weight:600}
+.aa-disclaimer{font-size:10.5px;color:var(--text3);line-height:1.4;margin-top:8px;padding:10px;background:var(--bg2);border-radius:10px}
 .debt-cross{margin-top:14px;padding-top:12px;border-top:1px solid var(--border)}
 .dcross-title{font-size:11px;font-weight:800;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px}
 .dcross-row{display:flex;justify-content:space-between;font-size:13px;font-weight:600;padding:4px 0}
@@ -3920,16 +4065,22 @@ img{display:block;max-width:100%}
 .stat-delta{font-size:10px;font-weight:600;margin-top:5px}
 .donut-section{padding:0 18px 18px}
 .donut-title{font-size:11px;font-weight:700;color:var(--text2);margin-bottom:14px;text-transform:uppercase;letter-spacing:.06em}
-.donut-row{display:flex;align-items:center;gap:20px}
-.donut-wrap{position:relative;width:110px;height:110px;flex-shrink:0}
-.donut-center{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center}
-.donut-center-val{font-size:14px;font-weight:800}
-.donut-center-lbl{font-size:9px;color:var(--text2);font-weight:600;text-transform:uppercase;letter-spacing:.04em}
-.donut-legend{flex:1;display:flex;flex-direction:column;gap:9px}
-.dleg{display:flex;align-items:center;gap:8px}
+.donut-row{display:flex;align-items:center;gap:18px;min-height:120px}
+.donut-wrap{position:relative;width:120px;height:120px;flex-shrink:0;display:flex;align-items:center;justify-content:center}
+.donut-center{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center}
+.donut-center-val{font-size:15px;font-weight:800;font-family:"Fraunces",serif;line-height:1.1}
+.donut-center-lbl{font-size:8.5px;color:var(--text2);font-weight:700;text-transform:uppercase;letter-spacing:.04em;margin-top:2px}
+.donut-legend{flex:1;display:flex;flex-direction:column;gap:8px;min-width:0}
+.dleg{display:flex;align-items:center;gap:8px;min-width:0}
 .dleg-dot{width:9px;height:9px;border-radius:3px;flex-shrink:0}
-.dleg-name{font-size:11px;color:var(--text2);flex:1;font-weight:500}
-.dleg-amt{font-size:12px;font-weight:700}
+.dleg-name{font-size:11.5px;color:var(--text2);flex:1;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dleg-amt{font-size:11.5px;font-weight:700;white-space:nowrap;flex-shrink:0}
+.trend-toggle-row{display:flex;gap:8px;margin:2px 0 14px}
+.trend-toggle{flex:1;background:var(--bg2);border:1px solid var(--border2);border-radius:12px;padding:8px;font-size:11.5px;font-weight:700;color:var(--text2);cursor:pointer;-webkit-tap-highlight-color:transparent;font-family:"Inter",sans-serif}
+.trend-toggle.on{background:var(--accent);color:#fff;border-color:var(--accent)}
+.trend-income-check{margin-top:12px;padding:11px 13px;border-radius:12px;font-size:12.5px;font-weight:600;line-height:1.4}
+.trend-income-check.ok{background:var(--greenbg);color:var(--green)}
+.trend-income-check.bad{background:var(--redbg);color:var(--red)}
 .cat-breakdown{padding:0 18px 18px}
 .cat-breakdown-title{font-size:11px;font-weight:700;color:var(--text2);margin-bottom:10px;text-transform:uppercase;letter-spacing:.06em}
 .cat-row{display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--border)}
@@ -4172,12 +4323,12 @@ img{display:block;max-width:100%}
   <div class="auth-question">¿Quién eres?</div>
   <div class="user-cards">
     <div class="user-card" id="ucard-felipe" onclick="selectUser('felipe')">
-      <div class="user-card-avatar" style="background:linear-gradient(135deg,#6B4EFF,#4E9FFF)">👨</div>
+      <div class="user-card-avatar" style="background:linear-gradient(135deg,#6B4EFF,#4E9FFF)">🧔</div>
       <div class="user-card-name">Felipe</div>
       <div class="user-card-role">👑 Admin</div>
     </div>
     <div class="user-card" id="ucard-melisa" onclick="selectUser('melisa')">
-      <div class="user-card-avatar" style="background:linear-gradient(135deg,#FF6B9A,#FF6B6B)">👩</div>
+      <div class="user-card-avatar" style="background:linear-gradient(135deg,#FF6B9A,#FF6B6B)">🦷</div>
       <div class="user-card-name">Melisa</div>
       <div class="user-card-role">Usuario</div>
     </div>
@@ -4494,7 +4645,7 @@ img{display:block;max-width:100%}
         </div>
 
         <button class="btn btn-red btn-full" style="margin-top:16px" onclick="doLogout()">↩️ Cerrar sesión</button>
-        <div style="text-align:center;font-size:10px;color:var(--text3);margin-top:14px">ListaJuntos v23</div>
+        <div style="text-align:center;font-size:10px;color:var(--text3);margin-top:14px">ListaJuntos v25</div>
       </div>
     </div>
 
@@ -4539,6 +4690,15 @@ img{display:block;max-width:100%}
 <!-- ══ SHEETS ══ -->
 
 <!-- Add Expense -->
+<div class="overlay" id="sheet-ahorroAnalisis" onclick="if(event.target===this)this.classList.remove('open')">
+  <div class="sheet">
+    <div class="sheet-handle" onclick="$('sheet-ahorroAnalisis').classList.remove('open')"></div>
+    <div class="sheet-close-row"><button class="sheet-close-btn" onclick="$('sheet-ahorroAnalisis').classList.remove('open')">✕ Cerrar</button></div>
+    <div class="sheet-title">🤖 Análisis de tus inversiones</div>
+    <div id="ahorroAnalisisContent"></div>
+  </div>
+</div>
+
 <div class="overlay" id="sheet-addAhorro" onclick="closeSheetIfBack(event,'addAhorro')">
   <div class="sheet">
     <div class="sheet-handle" onclick="closeSheet('addAhorro')"></div>
@@ -4600,20 +4760,22 @@ img{display:block;max-width:100%}
       </div>
       <div class="field-group" id="expRepeatWrap">
         <label>🔁 Repetir a futuro (opcional)</label>
-        <input class="field-input" id="expRepeatMonths" type="number" inputmode="numeric" min="1" max="600" placeholder="Escribe cuántos meses (ej: 12, 48...)" value="">
-        <div class="quick-months">
-          <span class="qm-chip" onclick="setExpMonths(1)">1 vez</span>
-          <span class="qm-chip" onclick="setExpMonths(3)">3m</span>
-          <span class="qm-chip" onclick="setExpMonths(6)">6m</span>
-          <span class="qm-chip" onclick="setExpMonths(12)">1 año</span>
-          <span class="qm-chip" onclick="setExpMonths(24)">2 años</span>
-          <span class="qm-chip" onclick="setExpMonths(36)">3 años</span>
-        </div>
-        <div style="font-size:10.5px;color:var(--text3);margin-top:6px">Déjalo vacío o en 1 para un gasto único. Escribe el número de meses para suscripciones, gym, arriendo, créditos, etc.</div>
+        <select class="field-input" id="expRepeatSelect" onchange="onExpRepeatSelect(this.value)">
+          <option value="1">Una sola vez</option>
+          <option value="3">3 meses</option>
+          <option value="6">6 meses</option>
+          <option value="12">12 meses (1 año)</option>
+          <option value="24">24 meses (2 años)</option>
+          <option value="36">36 meses (3 años)</option>
+          <option value="48">48 meses (4 años)</option>
+          <option value="custom">✏️ Otro (escribir cantidad)…</option>
+        </select>
+        <input class="field-input" id="expRepeatMonths" type="number" inputmode="numeric" min="1" max="600" placeholder="Escribe cuántos meses" value="" style="display:none;margin-top:8px">
+        <div style="font-size:10.5px;color:var(--text3);margin-top:6px">Para suscripciones, gym, arriendo o créditos, elige cuántos meses se repite.</div>
       </div>
       <div class="field-group">
         <label>Categoría</label>
-        <div class="cat-chips" id="expCatChips" style="padding:0;margin-top:6px"></div>
+        <select class="field-input" id="expCatSelect"></select>
       </div>
       <button class="btn btn-accent btn-full" id="expSubmitBtn" onclick="addExpense()">Registrar gasto</button>
     </div>
